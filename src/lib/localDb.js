@@ -372,14 +372,14 @@ export async function createProviderConnection(data) {
   const db = await getDb();
   const now = new Date().toISOString();
 
-  // Upsert: codex oauth uses account/workspace/plan identity; others keep legacy behavior
+  // Upsert: codex oauth uses account/organization/plan identity; others keep legacy behavior
   let existingIndex = -1;
   if (data.authType === "oauth") {
     if (data.provider === "codex") {
       const normalize = (value) => (typeof value === "string" ? value.trim() : "");
       const incomingEmail = normalize(data.email);
       const incomingAccountId = normalize(data.providerSpecificData?.chatgptAccountId);
-      const incomingWorkspaceId = normalize(data.providerSpecificData?.chatgptWorkspaceId);
+      const incomingOrganizationId = normalize(data.providerSpecificData?.chatgptOrganizationId);
       const incomingPlanType = normalize(data.providerSpecificData?.chatgptPlanType);
 
       const codexOAuthConnections = db.data.providerConnections
@@ -390,47 +390,62 @@ export async function createProviderConnection(data) {
         const found = codexOAuthConnections.find(({ connection }) => {
           const email = normalize(connection.email);
           const accountId = normalize(connection.providerSpecificData?.chatgptAccountId);
-          const workspaceId = normalize(connection.providerSpecificData?.chatgptWorkspaceId);
+          const organizationId = normalize(connection.providerSpecificData?.chatgptOrganizationId);
           const planType = normalize(connection.providerSpecificData?.chatgptPlanType);
-          return matcher({ email, accountId, workspaceId, planType });
+          return matcher({ email, accountId, organizationId, planType });
         });
         return found ? found.index : -1;
       };
 
-      if (incomingAccountId && incomingWorkspaceId && incomingPlanType) {
+      const incomingHasAccount = !!incomingAccountId;
+      const incomingHasOrganization = !!incomingOrganizationId;
+      const incomingHasPlan = !!incomingPlanType;
+
+      if (incomingHasAccount && incomingHasOrganization && incomingHasPlan) {
         existingIndex = findCodexExistingIndex(
-          ({ accountId, workspaceId, planType }) =>
+          ({ accountId, organizationId, planType }) =>
             accountId === incomingAccountId &&
-            workspaceId === incomingWorkspaceId &&
+            organizationId === incomingOrganizationId &&
             planType === incomingPlanType,
         );
       }
-      if (existingIndex === -1 && incomingAccountId && incomingWorkspaceId) {
+      // Legacy compat: if incoming has organization+plan but old row has missing plan, allow update.
+      if (existingIndex === -1 && incomingHasAccount && incomingHasOrganization) {
         existingIndex = findCodexExistingIndex(
-          ({ accountId, workspaceId }) =>
-            accountId === incomingAccountId && workspaceId === incomingWorkspaceId,
+          ({ accountId, organizationId, planType }) =>
+            accountId === incomingAccountId &&
+            organizationId === incomingOrganizationId &&
+            (!incomingHasPlan || !planType || planType === incomingPlanType),
         );
       }
-      if (existingIndex === -1 && incomingAccountId && incomingPlanType) {
+      // IMPORTANT: when organization is present, never fallback to organization-less matchers
+      // (prevents overwrite across different organizations/emails sharing account/plan).
+      if (existingIndex === -1 && incomingHasAccount && incomingHasPlan && !incomingHasOrganization) {
         existingIndex = findCodexExistingIndex(
           ({ accountId, planType }) =>
             accountId === incomingAccountId && planType === incomingPlanType,
         );
       }
-      if (existingIndex === -1 && incomingAccountId) {
+      if (existingIndex === -1 && incomingHasAccount && !incomingHasOrganization && !incomingHasPlan) {
         existingIndex = findCodexExistingIndex(
           ({ accountId }) => accountId === incomingAccountId,
         );
       }
-      if (existingIndex === -1 && incomingEmail && incomingWorkspaceId && incomingPlanType) {
+      if (existingIndex === -1 && incomingEmail && incomingHasOrganization && incomingHasPlan) {
         existingIndex = findCodexExistingIndex(
-          ({ email, workspaceId, planType }) =>
+          ({ email, organizationId, planType }) =>
             email === incomingEmail &&
-            workspaceId === incomingWorkspaceId &&
+            organizationId === incomingOrganizationId &&
             planType === incomingPlanType,
         );
       }
-      if (existingIndex === -1 && incomingEmail && incomingPlanType) {
+      if (existingIndex === -1 && incomingEmail && incomingHasOrganization && !incomingHasPlan) {
+        existingIndex = findCodexExistingIndex(
+          ({ email, organizationId }) =>
+            email === incomingEmail && organizationId === incomingOrganizationId,
+        );
+      }
+      if (existingIndex === -1 && incomingEmail && incomingHasPlan && !incomingHasOrganization) {
         existingIndex = findCodexExistingIndex(
           ({ email, planType }) =>
             email === incomingEmail && planType === incomingPlanType,
@@ -440,7 +455,7 @@ export async function createProviderConnection(data) {
         existingIndex === -1 &&
         incomingEmail &&
         !incomingAccountId &&
-        !incomingWorkspaceId &&
+        !incomingOrganizationId &&
         !incomingPlanType
       ) {
         existingIndex = findCodexExistingIndex(

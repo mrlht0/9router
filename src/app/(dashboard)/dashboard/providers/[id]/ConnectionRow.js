@@ -138,21 +138,12 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
           <p className="text-sm font-medium truncate">{displayName}</p>
           {showCodexMeta && codexMeta && (
             <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px] text-text-muted">
-              <span className="truncate max-w-[180px]" title={codexMeta.email}>
-                email: {codexMeta.email}
+              <span className="truncate max-w-[520px] font-mono" title={codexMeta.organizationDebugTitle}>
+                {codexMeta.email} | {codexMeta.plan} | {codexMeta.organizationId}
               </span>
-              <span className="truncate max-w-[120px]" title={codexMeta.plan}>
-                plan: {codexMeta.plan}
-              </span>
-              <span className="truncate max-w-[180px]" title={codexMeta.workspaceDebugTitle}>
-                workspace: {codexMeta.workspaceName}
-              </span>
-              <span className="truncate max-w-[260px] font-mono" title={codexMeta.workspaceDebugTitle}>
-                workspaceId: {codexMeta.workspaceId}
-              </span>
-              {codexMeta.isWorkspaceMismatch && (
-                <span className="truncate max-w-[180px] text-amber-600 dark:text-amber-400" title={codexMeta.workspaceDebugTitle}>
-                  workspace mismatch
+              {codexMeta.isOrganizationMismatch && (
+                <span className="truncate max-w-[180px] text-amber-600 dark:text-amber-400" title={codexMeta.organizationDebugTitle}>
+                  organization mismatch
                 </span>
               )}
             </div>

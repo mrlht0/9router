@@ -14,44 +14,44 @@ export function isCodexOAuthConnection(connection) {
 
 export function getCodexConnectionMeta(connection) {
   const providerSpecificData = connection?.providerSpecificData || {};
-  const activeWorkspaceNameRaw = normalizeText(providerSpecificData.chatgptActiveWorkspaceTitle);
-  const activeWorkspaceIdRaw = normalizeText(providerSpecificData.chatgptActiveWorkspaceId);
-  const tokenWorkspaceNameRaw = normalizeText(providerSpecificData.chatgptWorkspaceTitle);
-  const tokenWorkspaceIdRaw = normalizeText(providerSpecificData.chatgptWorkspaceId);
-  const workspaceSourceRaw = normalizeText(providerSpecificData.chatgptActiveWorkspaceSource);
+  const activeOrganizationNameRaw = normalizeText(providerSpecificData.chatgptActiveOrganizationTitle);
+  const activeOrganizationIdRaw = normalizeText(providerSpecificData.chatgptActiveOrganizationId);
+  const tokenOrganizationNameRaw = normalizeText(providerSpecificData.chatgptOrganizationTitle);
+  const tokenOrganizationIdRaw = normalizeText(providerSpecificData.chatgptOrganizationId);
+  const organizationSourceRaw = normalizeText(providerSpecificData.chatgptActiveOrganizationSource);
 
-  const workspaceNameRaw = activeWorkspaceNameRaw || tokenWorkspaceNameRaw;
-  const workspaceIdRaw = activeWorkspaceIdRaw || tokenWorkspaceIdRaw;
-  const hasWorkspaceIdMismatch = !!(
-    activeWorkspaceIdRaw &&
-    tokenWorkspaceIdRaw &&
-    activeWorkspaceIdRaw !== tokenWorkspaceIdRaw
+  const organizationNameRaw = activeOrganizationNameRaw || tokenOrganizationNameRaw;
+  const organizationIdRaw = activeOrganizationIdRaw || tokenOrganizationIdRaw;
+  const hasOrganizationIdMismatch = !!(
+    activeOrganizationIdRaw &&
+    tokenOrganizationIdRaw &&
+    activeOrganizationIdRaw !== tokenOrganizationIdRaw
   );
-  const hasWorkspaceNameMismatch = !!(
-    !hasWorkspaceIdMismatch &&
-    activeWorkspaceNameRaw &&
-    tokenWorkspaceNameRaw &&
-    activeWorkspaceNameRaw !== tokenWorkspaceNameRaw
+  const hasOrganizationNameMismatch = !!(
+    !hasOrganizationIdMismatch &&
+    activeOrganizationNameRaw &&
+    tokenOrganizationNameRaw &&
+    activeOrganizationNameRaw !== tokenOrganizationNameRaw
   );
-  const isWorkspaceMismatch = hasWorkspaceIdMismatch || hasWorkspaceNameMismatch;
+  const isOrganizationMismatch = hasOrganizationIdMismatch || hasOrganizationNameMismatch;
 
-  const workspaceDebugTitle = [
-    `activeWorkspace: ${toDisplayValue(activeWorkspaceNameRaw)} (${toDisplayValue(activeWorkspaceIdRaw)})`,
-    `tokenWorkspace: ${toDisplayValue(tokenWorkspaceNameRaw)} (${toDisplayValue(tokenWorkspaceIdRaw)})`,
-    `source: ${toDisplayValue(workspaceSourceRaw)}`,
+  const organizationDebugTitle = [
+    `activeOrganization: ${toDisplayValue(activeOrganizationNameRaw)} (${toDisplayValue(activeOrganizationIdRaw)})`,
+    `tokenOrganization: ${toDisplayValue(tokenOrganizationNameRaw)} (${toDisplayValue(tokenOrganizationIdRaw)})`,
+    `source: ${toDisplayValue(organizationSourceRaw)}`,
   ].join(" | ");
 
   return {
     email: toDisplayValue(connection?.email),
     plan: toDisplayValue(providerSpecificData.chatgptPlanType),
-    workspaceName: toDisplayValue(workspaceNameRaw),
-    workspaceId: toDisplayValue(workspaceIdRaw),
-    activeWorkspaceName: toDisplayValue(activeWorkspaceNameRaw),
-    activeWorkspaceId: toDisplayValue(activeWorkspaceIdRaw),
-    tokenWorkspaceName: toDisplayValue(tokenWorkspaceNameRaw),
-    tokenWorkspaceId: toDisplayValue(tokenWorkspaceIdRaw),
-    workspaceSource: toDisplayValue(workspaceSourceRaw),
-    workspaceDebugTitle,
-    isWorkspaceMismatch,
+    organizationName: toDisplayValue(organizationNameRaw),
+    organizationId: toDisplayValue(organizationIdRaw),
+    activeOrganizationName: toDisplayValue(activeOrganizationNameRaw),
+    activeOrganizationId: toDisplayValue(activeOrganizationIdRaw),
+    tokenOrganizationName: toDisplayValue(tokenOrganizationNameRaw),
+    tokenOrganizationId: toDisplayValue(tokenOrganizationIdRaw),
+    organizationSource: toDisplayValue(organizationSourceRaw),
+    organizationDebugTitle,
+    isOrganizationMismatch,
   };
 }
