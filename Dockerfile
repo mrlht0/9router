@@ -4,9 +4,6 @@ FROM ${BUN_IMAGE} AS base
 WORKDIR /app
 
 FROM base AS builder
-
-RUN apk --no-cache upgrade
-
 COPY package.json ./
 RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun install --frozen-lockfile
@@ -37,7 +34,7 @@ COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
 RUN mkdir -p /app/data && chown -R bun:bun /app
 
 # Fix permissions at runtime (handles mounted volumes)
-RUN apk --no-cache upgrade && apk --no-cache add su-exec && \
+RUN apk --no-cache add su-exec && \
   printf '#!/bin/sh\nchown -R bun:bun /app/data 2>/dev/null\nexec su-exec bun "$@"\n' > /entrypoint.sh && \
   chmod +x /entrypoint.sh
 
