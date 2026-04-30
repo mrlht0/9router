@@ -496,9 +496,9 @@ export default function ProviderLimits() {
                       {showCodexMeta && codexMeta ? (
                         <p
                           className="text-xs text-text-muted truncate"
-                          title={`${codexMeta.email} | ${codexMeta.plan} | ${codexMeta.organizationId} | ${codexMeta.organizationDebugTitle}`}
+                          title={`${codexMeta.email} | ${codexMeta.plan} | ${codexMeta.organizationName} | ${codexMeta.debugTitle}`}
                         >
-                          {codexMeta.email} | {codexMeta.plan} | {codexMeta.organizationId}{codexMeta.isOrganizationMismatch ? " | organization mismatch" : ""}
+                          {codexMeta.email} | {codexMeta.plan} | {codexMeta.organizationName}
                         </p>
                       ) : (() => {
                         const isEmail = (v) => typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);

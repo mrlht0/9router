@@ -138,14 +138,9 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
           <p className="text-sm font-medium truncate">{displayName}</p>
           {showCodexMeta && codexMeta && (
             <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px] text-text-muted">
-              <span className="truncate max-w-[520px] font-mono" title={codexMeta.organizationDebugTitle}>
-                {codexMeta.email} | {codexMeta.plan} | {codexMeta.organizationId}
+              <span className="truncate max-w-[520px] font-mono" title={codexMeta.debugTitle}>
+                {codexMeta.email} | {codexMeta.plan} | {codexMeta.organizationName}
               </span>
-              {codexMeta.isOrganizationMismatch && (
-                <span className="truncate max-w-[180px] text-amber-600 dark:text-amber-400" title={codexMeta.organizationDebugTitle}>
-                  organization mismatch
-                </span>
-              )}
             </div>
           )}
           <div className="flex items-center gap-2 mt-1">

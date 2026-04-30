@@ -14,44 +14,18 @@ export function isCodexOAuthConnection(connection) {
 
 export function getCodexConnectionMeta(connection) {
   const providerSpecificData = connection?.providerSpecificData || {};
-  const activeOrganizationNameRaw = normalizeText(providerSpecificData.chatgptActiveOrganizationTitle);
-  const activeOrganizationIdRaw = normalizeText(providerSpecificData.chatgptActiveOrganizationId);
-  const tokenOrganizationNameRaw = normalizeText(providerSpecificData.chatgptOrganizationTitle);
-  const tokenOrganizationIdRaw = normalizeText(providerSpecificData.chatgptOrganizationId);
-  const organizationSourceRaw = normalizeText(providerSpecificData.chatgptActiveOrganizationSource);
-
-  const organizationNameRaw = activeOrganizationNameRaw || tokenOrganizationNameRaw;
-  const organizationIdRaw = activeOrganizationIdRaw || tokenOrganizationIdRaw;
-  const hasOrganizationIdMismatch = !!(
-    activeOrganizationIdRaw &&
-    tokenOrganizationIdRaw &&
-    activeOrganizationIdRaw !== tokenOrganizationIdRaw
+  const organizationNameRaw = normalizeText(
+    providerSpecificData.organizationName ||
+    providerSpecificData.chatgptOrganizationName ||
+    providerSpecificData.chatgptOrganizationTitle ||
+    providerSpecificData.chatgptActiveOrganizationTitle,
   );
-  const hasOrganizationNameMismatch = !!(
-    !hasOrganizationIdMismatch &&
-    activeOrganizationNameRaw &&
-    tokenOrganizationNameRaw &&
-    activeOrganizationNameRaw !== tokenOrganizationNameRaw
-  );
-  const isOrganizationMismatch = hasOrganizationIdMismatch || hasOrganizationNameMismatch;
-
-  const organizationDebugTitle = [
-    `activeOrganization: ${toDisplayValue(activeOrganizationNameRaw)} (${toDisplayValue(activeOrganizationIdRaw)})`,
-    `tokenOrganization: ${toDisplayValue(tokenOrganizationNameRaw)} (${toDisplayValue(tokenOrganizationIdRaw)})`,
-    `source: ${toDisplayValue(organizationSourceRaw)}`,
-  ].join(" | ");
+  const debugTitle = `organizationName: ${toDisplayValue(organizationNameRaw)}`;
 
   return {
     email: toDisplayValue(connection?.email),
     plan: toDisplayValue(providerSpecificData.chatgptPlanType),
     organizationName: toDisplayValue(organizationNameRaw),
-    organizationId: toDisplayValue(organizationIdRaw),
-    activeOrganizationName: toDisplayValue(activeOrganizationNameRaw),
-    activeOrganizationId: toDisplayValue(activeOrganizationIdRaw),
-    tokenOrganizationName: toDisplayValue(tokenOrganizationNameRaw),
-    tokenOrganizationId: toDisplayValue(tokenOrganizationIdRaw),
-    organizationSource: toDisplayValue(organizationSourceRaw),
-    organizationDebugTitle,
-    isOrganizationMismatch,
+    debugTitle,
   };
 }

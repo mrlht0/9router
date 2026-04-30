@@ -372,15 +372,22 @@ export async function createProviderConnection(data) {
   const db = await getDb();
   const now = new Date().toISOString();
 
-  // Upsert: codex oauth uses account/organization/plan identity; others keep legacy behavior
+  // Upsert: codex oauth uses email/organizationName identity; others keep legacy behavior
   let existingIndex = -1;
   if (data.authType === "oauth") {
     if (data.provider === "codex") {
       const normalize = (value) => (typeof value === "string" ? value.trim() : "");
+      const getOrganizationName = (providerSpecificData) => {
+        const data = providerSpecificData || {};
+        return normalize(
+          data.organizationName ||
+          data.chatgptOrganizationName ||
+          data.chatgptOrganizationTitle ||
+          data.chatgptActiveOrganizationTitle,
+        );
+      };
       const incomingEmail = normalize(data.email);
-      const incomingAccountId = normalize(data.providerSpecificData?.chatgptAccountId);
-      const incomingOrganizationId = normalize(data.providerSpecificData?.chatgptOrganizationId);
-      const incomingPlanType = normalize(data.providerSpecificData?.chatgptPlanType);
+      const incomingOrganizationName = getOrganizationName(data.providerSpecificData);
 
       const codexOAuthConnections = db.data.providerConnections
         .map((connection, index) => ({ connection, index }))
@@ -389,77 +396,23 @@ export async function createProviderConnection(data) {
       const findCodexExistingIndex = (matcher) => {
         const found = codexOAuthConnections.find(({ connection }) => {
           const email = normalize(connection.email);
-          const accountId = normalize(connection.providerSpecificData?.chatgptAccountId);
-          const organizationId = normalize(connection.providerSpecificData?.chatgptOrganizationId);
-          const planType = normalize(connection.providerSpecificData?.chatgptPlanType);
-          return matcher({ email, accountId, organizationId, planType });
+          const organizationName = getOrganizationName(connection.providerSpecificData);
+          return matcher({ email, organizationName });
         });
         return found ? found.index : -1;
       };
 
-      const incomingHasAccount = !!incomingAccountId;
-      const incomingHasOrganization = !!incomingOrganizationId;
-      const incomingHasPlan = !!incomingPlanType;
-
-      if (incomingHasAccount && incomingHasOrganization && incomingHasPlan) {
+      if (incomingEmail && incomingOrganizationName) {
         existingIndex = findCodexExistingIndex(
-          ({ accountId, organizationId, planType }) =>
-            accountId === incomingAccountId &&
-            organizationId === incomingOrganizationId &&
-            planType === incomingPlanType,
-        );
-      }
-      // Legacy compat: if incoming has organization+plan but old row has missing plan, allow update.
-      if (existingIndex === -1 && incomingHasAccount && incomingHasOrganization) {
-        existingIndex = findCodexExistingIndex(
-          ({ accountId, organizationId, planType }) =>
-            accountId === incomingAccountId &&
-            organizationId === incomingOrganizationId &&
-            (!incomingHasPlan || !planType || planType === incomingPlanType),
-        );
-      }
-      // IMPORTANT: when organization is present, never fallback to organization-less matchers
-      // (prevents overwrite across different organizations/emails sharing account/plan).
-      if (existingIndex === -1 && incomingHasAccount && incomingHasPlan && !incomingHasOrganization) {
-        existingIndex = findCodexExistingIndex(
-          ({ accountId, planType }) =>
-            accountId === incomingAccountId && planType === incomingPlanType,
-        );
-      }
-      if (existingIndex === -1 && incomingHasAccount && !incomingHasOrganization && !incomingHasPlan) {
-        existingIndex = findCodexExistingIndex(
-          ({ accountId }) => accountId === incomingAccountId,
-        );
-      }
-      if (existingIndex === -1 && incomingEmail && incomingHasOrganization && incomingHasPlan) {
-        existingIndex = findCodexExistingIndex(
-          ({ email, organizationId, planType }) =>
+          ({ email, organizationName }) =>
             email === incomingEmail &&
-            organizationId === incomingOrganizationId &&
-            planType === incomingPlanType,
+            organizationName === incomingOrganizationName,
         );
       }
-      if (existingIndex === -1 && incomingEmail && incomingHasOrganization && !incomingHasPlan) {
+      if (existingIndex === -1 && incomingEmail && !incomingOrganizationName) {
         existingIndex = findCodexExistingIndex(
-          ({ email, organizationId }) =>
-            email === incomingEmail && organizationId === incomingOrganizationId,
-        );
-      }
-      if (existingIndex === -1 && incomingEmail && incomingHasPlan && !incomingHasOrganization) {
-        existingIndex = findCodexExistingIndex(
-          ({ email, planType }) =>
-            email === incomingEmail && planType === incomingPlanType,
-        );
-      }
-      if (
-        existingIndex === -1 &&
-        incomingEmail &&
-        !incomingAccountId &&
-        !incomingOrganizationId &&
-        !incomingPlanType
-      ) {
-        existingIndex = findCodexExistingIndex(
-          ({ email }) => email === incomingEmail,
+          ({ email, organizationName }) =>
+            email === incomingEmail && !organizationName,
         );
       }
     } else if (data.email) {

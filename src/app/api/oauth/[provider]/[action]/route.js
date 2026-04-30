@@ -106,15 +106,27 @@ export async function POST(request, { params }) {
 
     if (action === "exchange") {
       const { code, redirectUri, codeVerifier, state, meta } = body;
+      const codexOrganizationName = typeof meta?.organizationName === "string"
+        ? meta.organizationName.trim()
+        : "";
 
       // Cline uses authorization_code without PKCE
       const noPkceExchangeProviders = ["cline"];
       if (!code || !redirectUri || (!codeVerifier && !noPkceExchangeProviders.includes(provider))) {
         return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
       }
+      if (provider === "codex" && !codexOrganizationName) {
+        return NextResponse.json({ error: "Missing organizationName" }, { status: 400 });
+      }
 
       // Exchange code for tokens (meta carries provider-specific params, e.g. gitlab clientId/baseUrl)
       const tokenData = await exchangeTokens(provider, code, redirectUri, codeVerifier, state, meta);
+      if (provider === "codex") {
+        tokenData.providerSpecificData = {
+          ...(tokenData.providerSpecificData || {}),
+          organizationName: codexOrganizationName,
+        };
+      }
 
       // Save to database
       const connection = await createProviderConnection({

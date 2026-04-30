@@ -52,123 +52,16 @@ function extractEmailFromAccessToken(accessToken) {
   return payload.email || payload.preferred_username || payload.sub || undefined;
 }
 
-function normalizeOrganizationList(organizations) {
-  if (Array.isArray(organizations)) return organizations.filter(Boolean);
-  if (organizations && Array.isArray(organizations.data)) return organizations.data.filter(Boolean);
-  return [];
-}
-
-function pickDefaultOrganization(organizations) {
-  const normalized = normalizeOrganizationList(organizations);
-  return (
-    normalized.find((organization) => organization && organization.is_default === true) ||
-    normalized.find((organization) => !!organization) ||
-    null
-  );
-}
-
-function pickFirstNonEmptyString(...values) {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function extractOrganizationPreviewFromToken(chatgptClaim = {}) {
-  const organization = pickDefaultOrganization(chatgptClaim.organizations);
-  return {
-    chatgptOrganizationId: pickFirstNonEmptyString(organization?.id),
-    chatgptOrganizationTitle: pickFirstNonEmptyString(organization?.title, organization?.name),
-  };
-}
-
-function extractOrganizationIdFromSession(session = {}) {
-  return (
-    pickFirstNonEmptyString(
-      session?.organizationId,
-      session?.organization_id,
-      session?.activeOrganizationId,
-      session?.active_organization_id,
-      session?.account?.organizationId,
-      session?.account?.organization_id,
-      session?.organization?.id,
-      session?.activeOrganization?.id,
-      session?.active_organization?.id,
-      session?.user?.organizationId,
-      session?.user?.organization_id,
-      session?.user?.activeOrganizationId,
-      session?.user?.active_organization_id,
-      session?.user?.organization?.id,
-      session?.user?.activeOrganization?.id,
-      session?.user?.active_organization?.id,
-      session?.team?.id,
-      session?.user?.team?.id,
-    ) || null
-  );
-}
-
-function extractOrganizationTitleFromSession(session = {}) {
-  return pickFirstNonEmptyString(
-    session?.organizationName,
-    session?.organization_name,
-    session?.account?.organizationName,
-    session?.account?.organization_name,
-    session?.organization?.name,
-    session?.organization?.title,
-    session?.activeOrganization?.name,
-    session?.activeOrganization?.title,
-    session?.active_organization?.name,
-    session?.active_organization?.title,
-    session?.user?.organizationName,
-    session?.user?.organization_name,
-    session?.user?.organization?.name,
-    session?.user?.organization?.title,
-    session?.user?.activeOrganization?.name,
-    session?.user?.activeOrganization?.title,
-    session?.user?.active_organization?.name,
-    session?.user?.active_organization?.title,
-    session?.team?.name,
-    session?.user?.team?.name,
-  );
-}
-
-async function fetchCodexActiveOrganization(accessToken) {
-  if (!accessToken) return null;
-  try {
-    const response = await fetch("https://chatgpt.com/api/auth/session", {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-        "User-Agent": "Mozilla/5.0",
-      },
-    });
-    if (!response.ok) return null;
-
-    const session = await response.json();
-    return {
-      chatgptActiveOrganizationId: extractOrganizationIdFromSession(session),
-      chatgptActiveOrganizationTitle: extractOrganizationTitleFromSession(session),
-      chatgptActiveOrganizationSource: "auth_session",
-    };
-  } catch {
-    return null;
-  }
-}
-
 // Extract codex account info from id_token
 export function extractCodexAccountInfo(idToken) {
   const payload = decodeJwtPayload(idToken);
   if (!payload) return {};
   const chatgpt = payload["https://api.openai.com/auth"] || {};
-  const organizationPreview = extractOrganizationPreviewFromToken(chatgpt);
 
   return {
     email: payload.email,
     chatgptAccountId: chatgpt.chatgpt_account_id,
     chatgptPlanType: chatgpt.chatgpt_plan_type,
-    chatgptOrganizationId: organizationPreview.chatgptOrganizationId,
-    chatgptOrganizationTitle: organizationPreview.chatgptOrganizationTitle,
   };
 }
 
@@ -275,13 +168,8 @@ const PROVIDERS = {
 
       return await response.json();
     },
-    postExchange: async (tokens) => {
-      const activeOrganization = await fetchCodexActiveOrganization(tokens.access_token);
-      return { activeOrganization };
-    },
-    mapTokens: (tokens, extra) => {
+    mapTokens: (tokens) => {
       const info = extractCodexAccountInfo(tokens.id_token);
-      const activeOrganization = extra?.activeOrganization;
       const mapped = {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
@@ -292,22 +180,6 @@ const PROVIDERS = {
       const providerSpecificData = {};
       if (info.chatgptAccountId) providerSpecificData.chatgptAccountId = info.chatgptAccountId;
       if (info.chatgptPlanType) providerSpecificData.chatgptPlanType = info.chatgptPlanType;
-      const activeOrganizationId = activeOrganization?.chatgptActiveOrganizationId ?? null;
-      const organizationId = activeOrganizationId;
-      const organizationTitle =
-        activeOrganization?.chatgptActiveOrganizationTitle || info.chatgptOrganizationTitle || "";
-      const organizationSource = activeOrganization?.chatgptActiveOrganizationSource ||
-        "auth_session_unavailable";
-
-      // Explicit null for personal accounts (no organizationId in session).
-      providerSpecificData.chatgptOrganizationId = organizationId;
-      providerSpecificData.chatgptActiveOrganizationId = organizationId;
-      providerSpecificData.chatgptActiveOrganizationSource = organizationSource;
-
-      if (organizationTitle) {
-        providerSpecificData.chatgptOrganizationTitle = organizationTitle;
-        providerSpecificData.chatgptActiveOrganizationTitle = organizationTitle;
-      }
       if (Object.keys(providerSpecificData).length > 0) {
         mapped.providerSpecificData = providerSpecificData;
       }
@@ -1349,7 +1221,7 @@ export async function exchangeTokens(providerName, code, redirectUri, codeVerifi
 
   let extra = null;
   if (provider.postExchange) {
-    extra = await provider.postExchange(tokens);
+    extra = await provider.postExchange(tokens, meta || {});
   }
 
   return provider.mapTokens(tokens, extra);
@@ -1387,7 +1259,7 @@ export async function pollForToken(providerName, deviceCode, codeVerifier, extra
       // Call postExchange to get additional data (copilotToken, userInfo, etc.)
       let extra = null;
       if (provider.postExchange) {
-        extra = await provider.postExchange(result.data);
+        extra = await provider.postExchange(result.data, extraData || {});
       }
       return { success: true, tokens: provider.mapTokens(result.data, extra) };
     } else {
@@ -1427,28 +1299,17 @@ export async function backfillCodexEmails() {
     const targets = connections.filter((c) => {
       if (c.provider !== "codex" || c.authType !== "oauth") return false;
       const providerSpecificData = c.providerSpecificData || {};
-      const hasOwn = (key) => Object.prototype.hasOwnProperty.call(providerSpecificData, key);
-      const isTeamPlan = (providerSpecificData.chatgptPlanType || "").toLowerCase() === "team";
       const hasEmail = !!c.email;
       const hasAccountInfo = !!providerSpecificData.chatgptAccountId;
       const hasPlanType = !!providerSpecificData.chatgptPlanType;
-      const hasOrganizationId = hasOwn("chatgptOrganizationId") && (!isTeamPlan || providerSpecificData.chatgptOrganizationId !== null);
-      const hasActiveOrganizationId = hasOwn("chatgptActiveOrganizationId") && (!isTeamPlan || providerSpecificData.chatgptActiveOrganizationId !== null);
-      const activeOrganizationSource = providerSpecificData.chatgptActiveOrganizationSource;
-      const hasActiveOrganizationSource =
-        activeOrganizationSource === "auth_session" || activeOrganizationSource === "auth_session_unavailable";
       return (
         !hasEmail ||
         !hasAccountInfo ||
-        !hasPlanType ||
-        !hasOrganizationId ||
-        !hasActiveOrganizationId ||
-        !hasActiveOrganizationSource
+        !hasPlanType
       );
     });
     for (const conn of targets) {
       const info = conn.idToken ? extractCodexAccountInfo(conn.idToken) : {};
-      const activeOrganization = await fetchCodexActiveOrganization(conn.accessToken);
       const patch = {};
       if (!conn.email && info.email) patch.email = info.email;
       const nextProviderSpecificData = {
@@ -1461,42 +1322,6 @@ export async function backfillCodexEmails() {
       }
       if (!nextProviderSpecificData.chatgptPlanType && info.chatgptPlanType) {
         nextProviderSpecificData.chatgptPlanType = info.chatgptPlanType;
-        shouldPatchProviderSpecificData = true;
-      }
-      const organizationTitle =
-        activeOrganization?.chatgptActiveOrganizationTitle ||
-        info.chatgptOrganizationTitle ||
-        nextProviderSpecificData.chatgptOrganizationTitle ||
-        "";
-
-      if (organizationTitle && !nextProviderSpecificData.chatgptOrganizationTitle) {
-        nextProviderSpecificData.chatgptOrganizationTitle = organizationTitle;
-        shouldPatchProviderSpecificData = true;
-      }
-      if (organizationTitle && !nextProviderSpecificData.chatgptActiveOrganizationTitle) {
-        nextProviderSpecificData.chatgptActiveOrganizationTitle = organizationTitle;
-        shouldPatchProviderSpecificData = true;
-      }
-      const activeOrganizationId = activeOrganization?.chatgptActiveOrganizationId ?? null;
-      const organizationId = activeOrganizationId;
-      const organizationSource =
-        activeOrganization?.chatgptActiveOrganizationSource ||
-        "auth_session_unavailable";
-
-      if (
-        nextProviderSpecificData.chatgptOrganizationId !== organizationId
-      ) {
-        nextProviderSpecificData.chatgptOrganizationId = organizationId;
-        shouldPatchProviderSpecificData = true;
-      }
-      if (
-        nextProviderSpecificData.chatgptActiveOrganizationId !== organizationId
-      ) {
-        nextProviderSpecificData.chatgptActiveOrganizationId = organizationId;
-        shouldPatchProviderSpecificData = true;
-      }
-      if (nextProviderSpecificData.chatgptActiveOrganizationSource !== organizationSource) {
-        nextProviderSpecificData.chatgptActiveOrganizationSource = organizationSource;
         shouldPatchProviderSpecificData = true;
       }
       if (shouldPatchProviderSpecificData) {

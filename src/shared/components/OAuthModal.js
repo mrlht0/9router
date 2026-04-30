@@ -11,9 +11,12 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
  * - Remote: Manual paste callback URL
  */
 export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, onClose, oauthMeta, idcConfig }) {
-  const [step, setStep] = useState("waiting"); // waiting | input | success | error
+  const [step, setStep] = useState("waiting"); // waiting | input | codex-org | success | error
   const [authData, setAuthData] = useState(null);
   const [callbackUrl, setCallbackUrl] = useState("");
+  const [pendingCallbackData, setPendingCallbackData] = useState(null);
+  const [organizationName, setOrganizationName] = useState("");
+  const [submittingOrganizationName, setSubmittingOrganizationName] = useState(false);
   const [error, setError] = useState(null);
   const [isDeviceCode, setIsDeviceCode] = useState(false);
   const [deviceData, setDeviceData] = useState(null);
@@ -40,9 +43,13 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   // Define all useCallback hooks BEFORE the useEffects that reference them
 
   // Exchange tokens
-  const exchangeTokens = useCallback(async (code, state) => {
-    if (!authData) return;
+  const exchangeTokens = useCallback(async (code, state, extraMeta) => {
+    if (!authData) return false;
     try {
+      const mergedMeta = {
+        ...(oauthMeta || {}),
+        ...(extraMeta || {}),
+      };
       const res = await fetch(`/api/oauth/${provider}/exchange`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -51,7 +58,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
           redirectUri: authData.redirectUri,
           codeVerifier: authData.codeVerifier,
           state,
-          ...(oauthMeta ? { meta: oauthMeta } : {}),
+          ...(Object.keys(mergedMeta).length ? { meta: mergedMeta } : {}),
         }),
       });
 
@@ -60,11 +67,30 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
 
       setStep("success");
       onSuccess?.();
+      return true;
     } catch (err) {
       setError(err.message);
       setStep("error");
+      return false;
     }
-  }, [authData, provider, onSuccess]);
+  }, [authData, provider, onSuccess, oauthMeta]);
+
+  const requestCodexOrganizationName = useCallback((code, state) => {
+    setPendingCallbackData({ code, state });
+    setOrganizationName("");
+    setStep("codex-org");
+  }, []);
+
+  const handleCodexOrganizationSubmit = useCallback(async () => {
+    const trimmedOrganizationName = organizationName.trim();
+    if (!pendingCallbackData || !trimmedOrganizationName) return;
+
+    setSubmittingOrganizationName(true);
+    const success = await exchangeTokens(pendingCallbackData.code, pendingCallbackData.state, {
+      organizationName: trimmedOrganizationName,
+    });
+    if (!success) setSubmittingOrganizationName(false);
+  }, [exchangeTokens, organizationName, pendingCallbackData]);
 
   // Poll for device code token
   const startPolling = useCallback(async (deviceCode, codeVerifier, interval, extraData) => {
@@ -228,6 +254,9 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
     if (isOpen && provider) {
       setAuthData(null);
       setCallbackUrl("");
+      setPendingCallbackData(null);
+      setOrganizationName("");
+      setSubmittingOrganizationName(false);
       setError(null);
       setIsDeviceCode(false);
       setDeviceData(null);
@@ -263,6 +292,10 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
 
       if (code) {
         callbackProcessedRef.current = true;
+        if (provider === "codex") {
+          requestCodexOrganizationName(code, state);
+          return;
+        }
         await exchangeTokens(code, state);
       }
     };
@@ -322,7 +355,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       window.removeEventListener("storage", handleStorage);
       if (channel) channel.close();
     };
-  }, [authData, exchangeTokens]);
+  }, [authData, exchangeTokens, provider, requestCodexOrganizationName]);
 
   // Handle manual URL input
   const handleManualSubmit = async () => {
@@ -339,6 +372,11 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
 
       if (!code) {
         throw new Error("No authorization code found in URL");
+      }
+
+      if (provider === "codex") {
+        requestCodexOrganizationName(code, state);
+        return;
       }
 
       await exchangeTokens(code, state);
@@ -462,6 +500,44 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
             <div className="flex gap-2">
               <Button onClick={handleManualSubmit} fullWidth disabled={!callbackUrl}>
                 Connect
+              </Button>
+              <Button onClick={handleClose} variant="ghost" fullWidth>
+                Cancel
+              </Button>
+            </div>
+          </>
+        )}
+
+        {/* Codex Organization Name Step */}
+        {step === "codex-org" && (
+          <>
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-lg font-semibold mb-2">Organization Name</h3>
+                <p className="text-sm text-text-muted mb-4">
+                  Enter the organization label for this Codex account. This is used with the email to update the right connection.
+                </p>
+                <Input
+                  value={organizationName}
+                  onChange={(e) => setOrganizationName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && organizationName.trim() && !submittingOrganizationName) {
+                      handleCodexOrganizationSubmit();
+                    }
+                  }}
+                  placeholder="Personal or team name"
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <Button
+                onClick={handleCodexOrganizationSubmit}
+                fullWidth
+                disabled={!organizationName.trim() || submittingOrganizationName}
+              >
+                {submittingOrganizationName ? "Connecting..." : "Connect"}
               </Button>
               <Button onClick={handleClose} variant="ghost" fullWidth>
                 Cancel
