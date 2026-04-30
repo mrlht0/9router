@@ -28,13 +28,10 @@ COPY --from=builder /app/open-sse ./open-sse
 COPY --from=builder /app/src/mitm ./src/mitm
 COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
 
-RUN mkdir -p /app/data && chown -R node:node /app
+RUN apk --no-cache add shadow && \
+  (groupadd -g 1000 node || true) && \
+  (useradd -u 1000 -g node node || true)
 
-RUN apk --no-cache add su-exec && \
-  printf '#!/bin/sh\nchown -R node:node /app/data 2>/dev/null\nexec su-exec node "$@"\n' > /entrypoint.sh && \
-  chmod +x /entrypoint.sh
+EXPOSE 9999
 
-EXPOSE 20128
-
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["node", "server.js"]
+ENTRYPOINT ["node", "server.js"]
