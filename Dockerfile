@@ -5,15 +5,15 @@ WORKDIR /app
 
 FROM base AS builder
 
-RUN apk --no-cache upgrade && apk --no-cache add nodejs npm python3 make g++ linux-headers
+RUN apk --no-cache upgrade
 
 COPY package.json ./
-RUN --mount=type=cache,target=/root/.npm \
-  npm install
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+  bun install --frozen-lockfile
 
 COPY . ./
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build
+RUN bun run build
 
 FROM ${BUN_IMAGE} AS runner
 WORKDIR /app
