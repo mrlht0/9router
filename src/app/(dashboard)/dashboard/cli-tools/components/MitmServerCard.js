@@ -20,7 +20,8 @@ export default function MitmServerCard({ apiKeys, cloudEnabled, onStatusChange }
   const [actionError, setActionError] = useState(null);
   const [mitmRouterBaseUrl, setMitmRouterBaseUrl] = useState(DEFAULT_MITM_ROUTER_BASE);
 
-  const isWindows = typeof navigator !== "undefined" && navigator.userAgent?.includes("Windows");
+  const serverIsWindows = status?.isWin === true;
+  const canRunWithoutPassword = serverIsWindows || status?.hasCachedPassword || status?.needsSudoPassword === false;
   const isAdmin = status?.isAdmin !== false;
 
   useEffect(() => {
@@ -51,7 +52,7 @@ export default function MitmServerCard({ apiKeys, cloudEnabled, onStatusChange }
 
   const handleAction = (action) => {
     setActionError(null);
-    if (isWindows || status?.hasCachedPassword) {
+    if (canRunWithoutPassword) {
       doAction(action, "");
     } else {
       setPendingAction(action);
@@ -219,7 +220,7 @@ export default function MitmServerCard({ apiKeys, cloudEnabled, onStatusChange }
             ) : (
               <button
                 onClick={() => handleAction("start")}
-                disabled={loading || (isWindows && !isAdmin)}
+                disabled={loading || (serverIsWindows && !isAdmin)}
                 className="px-4 py-1.5 rounded-lg bg-primary/10 border border-primary/30 text-primary font-medium text-xs flex items-center gap-1.5 hover:bg-primary/20 transition-colors disabled:opacity-50"
               >
                 <span className="material-symbols-outlined text-[16px]">play_circle</span>
@@ -240,7 +241,7 @@ export default function MitmServerCard({ apiKeys, cloudEnabled, onStatusChange }
           )}
 
           {/* Windows admin warning */}
-          {isWindows && !isAdmin && (
+          {serverIsWindows && !isAdmin && (
             <div className="flex items-center gap-2 px-2 py-1.5 rounded text-xs bg-red-500/10 text-red-600 border border-red-500/20">
               <span className="material-symbols-outlined text-[14px]">shield_lock</span>
               <span>Administrator required — restart 9Router as Administrator to use MITM</span>
