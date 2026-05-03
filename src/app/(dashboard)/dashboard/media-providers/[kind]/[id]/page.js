@@ -1168,7 +1168,7 @@ function GenericExampleCard({ providerId, kind }) {
                 )}
               </div>
               {refImage.trim() && (
-                <img
+                <Image
                   src={refImage.trim()}
                   alt="Reference"
                   className="max-h-40 rounded-lg border border-border object-contain bg-sidebar"
@@ -1274,7 +1274,7 @@ function GenericExampleCard({ providerId, kind }) {
         {partialImage?.b64_json && !result && (
           <div>
             <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">Partial preview</span>
-            <img
+            <Image
               src={`data:image/png;base64,${partialImage.b64_json}`}
               alt="Partial"
               className="max-w-full rounded-lg border border-border mt-1.5 opacity-80"
@@ -1316,7 +1316,7 @@ function GenericExampleCard({ providerId, kind }) {
                   Download
                 </a>
               </div>
-              <img
+              <Image
                 src={binaryImageUrl || (result?.data?.data?.[0]?.b64_json ? `data:image/png;base64,${result.data.data[0].b64_json}` : result?.data?.data?.[0]?.url)}
                 alt="Generated"
                 className="max-w-full rounded-lg border border-border"

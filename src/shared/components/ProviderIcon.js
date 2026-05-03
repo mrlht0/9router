@@ -30,7 +30,7 @@ export default function ProviderIcon({
   }
 
   return (
-    <img
+    <Image
       src={src}
       alt={alt}
       width={size}
