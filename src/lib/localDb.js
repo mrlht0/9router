@@ -36,6 +36,7 @@ const DEFAULT_SETTINGS = {
   outboundProxyUrl: "",
   outboundNoProxy: "",
   mitmRouterBaseUrl: DEFAULT_MITM_ROUTER_BASE,
+  dnsToolEnabled: {},
   rtkEnabled: true,
   cavemanEnabled: false,
   cavemanLevel: "full",
@@ -415,7 +416,7 @@ export async function createProviderConnection(data) {
   const optionalFields = [
     "displayName", "email", "globalPriority", "defaultModel",
     "accessToken", "refreshToken", "expiresAt", "tokenType",
-    "scope", "idToken", "projectId", "apiKey", "testStatus",
+    "scope", "projectId", "apiKey", "testStatus",
     "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn", "errorCode",
     "consecutiveUseCount"
   ];
@@ -681,7 +682,7 @@ export async function cleanupProviderConnections() {
   const fieldsToCheck = [
     "displayName", "email", "globalPriority", "defaultModel",
     "accessToken", "refreshToken", "expiresAt", "tokenType",
-    "scope", "idToken", "projectId", "apiKey", "testStatus",
+    "scope", "projectId", "apiKey", "testStatus",
     "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn",
     "consecutiveUseCount"
   ];

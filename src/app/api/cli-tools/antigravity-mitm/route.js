@@ -9,6 +9,7 @@ import {
   getCachedPassword,
   setCachedPassword,
   loadEncryptedPassword,
+  isSudoPasswordRequired,
   initDbHooks,
 } from "@/mitm/manager";
 import { getSettings, updateSettings } from "@/lib/localDb";
@@ -40,14 +41,27 @@ function getPassword(provided) {
   return provided || getCachedPassword() || null;
 }
 
+function requiresSudoPassword(pwd) {
+  return !isWin && !pwd && isSudoPasswordRequired();
+}
+
 function checkIsAdmin() {
-  if (!isWin) return true;
-  try {
-    require("child_process").execSync("net session >nul 2>&1", { windowsHide: true });
-    return true;
-  } catch {
-    return false;
+  if (isWin) {
+    try {
+      require("child_process").execSync("net session >nul 2>&1", { windowsHide: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
+  return typeof process.getuid === "function" && process.getuid() === 0;
+}
+
+function checkPrivilege(pwd) {
+  if (checkIsAdmin()) return true;
+  if (isWin) return false;
+  if (!isSudoPasswordRequired()) return true;
+  return !!pwd;
 }
 
 // GET - Full MITM status (server + per-tool DNS)
@@ -55,13 +69,16 @@ export async function GET() {
   try {
     const status = await getMitmStatus();
     const settings = await getSettings();
+    const hasCachedPassword = !!getCachedPassword() || !!(await loadEncryptedPassword());
     return NextResponse.json({
       running: status.running,
       pid: status.pid || null,
       certExists: status.certExists || false,
       certTrusted: status.certTrusted || false,
       dnsStatus: status.dnsStatus || {},
-      hasCachedPassword: !!getCachedPassword() || !!(await loadEncryptedPassword()),
+      hasCachedPassword,
+      isWin,
+      needsSudoPassword: !isWin && !hasCachedPassword && isSudoPasswordRequired(),
       isAdmin: checkIsAdmin(),
       mitmRouterBaseUrl:
         (settings.mitmRouterBaseUrl && String(settings.mitmRouterBaseUrl).trim()) ||
@@ -79,10 +96,17 @@ export async function POST(request) {
     const { apiKey, sudoPassword, mitmRouterBaseUrl } = await request.json();
     const pwd = getPassword(sudoPassword) || await loadEncryptedPassword() || "";
 
-    if (!apiKey || (!isWin && !pwd)) {
+    if (!apiKey || requiresSudoPassword(pwd)) {
       return NextResponse.json(
-        { error: isWin ? "Missing apiKey" : "Missing apiKey or sudoPassword" },
+        { error: !apiKey ? "Missing apiKey" : "Missing sudoPassword" },
         { status: 400 }
+      );
+    }
+
+    if (!checkPrivilege(pwd)) {
+      return NextResponse.json(
+        { error: isWin ? "Administrator required — restart 9Router as Administrator" : "Root or sudo password required to start MITM" },
+        { status: 403 }
       );
     }
 
@@ -115,7 +139,7 @@ export async function DELETE(request) {
     const { sudoPassword } = body;
     const pwd = getPassword(sudoPassword) || await loadEncryptedPassword() || "";
 
-    if (!isWin && !pwd) {
+    if (requiresSudoPassword(pwd)) {
       return NextResponse.json({ error: "Missing sudoPassword" }, { status: 400 });
     }
 
@@ -138,8 +162,14 @@ export async function PATCH(request) {
     if (!tool || !action) {
       return NextResponse.json({ error: "tool and action required" }, { status: 400 });
     }
-    if (!isWin && !pwd) {
+    if (requiresSudoPassword(pwd)) {
       return NextResponse.json({ error: "Missing sudoPassword" }, { status: 400 });
+    }
+    if (!checkPrivilege(pwd)) {
+      return NextResponse.json(
+        { error: isWin ? "Administrator required — restart 9Router as Administrator" : "Root or sudo password required to modify DNS" },
+        { status: 403 }
+      );
     }
 
     if (action === "enable") {

@@ -18,6 +18,7 @@ export default function MitmToolCard({
   serverRunning,
   dnsActive,
   hasCachedPassword,
+  needsSudoPassword,
   apiKeys,
   activeProviders,
   hasActiveProviders,
@@ -36,7 +37,7 @@ export default function MitmToolCard({
   const [currentEditingAlias, setCurrentEditingAlias] = useState(null);
 
   const mitmHosts = TOOL_HOSTS[tool.id] ?? [];
-  const isWindows = typeof navigator !== "undefined" && navigator.userAgent?.includes("Windows");
+  const canRunWithoutPassword = hasCachedPassword || needsSudoPassword === false;
 
   useEffect(() => {
     if (isExpanded) loadSavedMappings();
@@ -85,7 +86,7 @@ export default function MitmToolCard({
   const handleDnsToggle = () => {
     if (!serverRunning) return;
     const action = dnsActive ? "disable" : "enable";
-    if (isWindows || hasCachedPassword) {
+    if (canRunWithoutPassword) {
       doDnsAction(action, "");
     } else {
       setPendingDnsAction(action);
@@ -191,7 +192,7 @@ export default function MitmToolCard({
             {tool.defaultModels?.length > 0 && (
               <div className="flex flex-col gap-2">
                 {tool.defaultModels.map((model) => (
-                  <div key={model.alias} className="grid gap-1.5 sm:grid-cols-[9rem_auto_1fr_auto_auto] sm:items-center sm:gap-2">
+                  <div key={model.alias} className="grid grid-cols-1 gap-1.5 sm:grid-cols-[9rem_auto_1fr_auto_auto] sm:items-center sm:gap-2">
                     <span className="text-xs font-semibold text-text-main sm:text-right">{model.name}</span>
                     <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
                     <input

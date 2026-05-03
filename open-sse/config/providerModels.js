@@ -5,6 +5,27 @@ import { buildTtsProviderModels } from "./ttsModels.js";
 // Key = alias (cc, cx, gc, qw, if, ag, gh for OAuth; id for API Key)
 // Field "provider" for special cases (e.g. AntiGravity models that call different backends)
 
+const CODEX_REVIEW_SUFFIX = "-review";
+
+function withCodexReviewModels(models) {
+  return models.flatMap((model) => {
+    if ((model.type || "llm") !== "llm" || model.id.endsWith(CODEX_REVIEW_SUFFIX)) {
+      return [model];
+    }
+
+    return [
+      model,
+      {
+        ...model,
+        id: `${model.id}${CODEX_REVIEW_SUFFIX}`,
+        name: `${model.name} Review`,
+        upstreamModelId: model.upstreamModelId || model.id,
+        quotaFamily: "review",
+      },
+    ];
+  });
+}
+
 export const PROVIDER_MODELS = {
   // OAuth Providers (using alias)
   cc: [  // Claude Code
@@ -15,7 +36,7 @@ export const PROVIDER_MODELS = {
     { id: "claude-sonnet-4-5-20250929", name: "Claude 4.5 Sonnet" },
     { id: "claude-haiku-4-5-20251001", name: "Claude 4.5 Haiku" },
   ],
-  cx: [  // OpenAI Codex
+  cx: withCodexReviewModels([  // OpenAI Codex
     { id: "gpt-5.5", name: "GPT 5.5" },
     { id: "gpt-5.4", name: "GPT 5.4" },
     // GPT 5.3 Codex - all thinking levels
@@ -40,7 +61,7 @@ export const PROVIDER_MODELS = {
     { id: "gpt-5.4-image", name: "GPT 5.4 Image", type: "image", capabilities: ["text2img", "edit"], params: ["size", "quality", "background", "image_detail", "output_format"] },
     { id: "gpt-5.3-image", name: "GPT 5.3 Image", type: "image", capabilities: ["text2img", "edit"], params: ["size", "quality", "background", "image_detail", "output_format"] },
     { id: "gpt-5.2-image", name: "GPT 5.2 Image", type: "image", capabilities: ["text2img", "edit"], params: ["size", "quality", "background", "image_detail", "output_format"] },
-  ],
+  ]),
   gc: [  // Gemini CLI
     { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview" },
     { id: "gemini-3-pro-preview", name: "Gemini 3 Pro Preview" },
@@ -348,8 +369,19 @@ export const PROVIDER_MODELS = {
     { id: "DeepSeek-V3.2", name: "DeepSeek-V3.2" },
   ],
   "cloudflare-ai": [
+    { id: "@cf/meta/llama-3.2-1b-instruct", name: "Llama 3.2 1B Instruct" },
+    { id: "@cf/meta/llama-3.2-3b-instruct", name: "Llama 3.2 3B Instruct" },
+    { id: "@cf/meta/llama-3.1-8b-instruct-fp8-fast", name: "Llama 3.1 8B Instruct FP8 Fast" },
+    { id: "@cf/meta/llama-3.1-8b-instruct-awq", name: "Llama 3.1 8B Instruct AWQ" },
+    { id: "@cf/mistralai/mistral-small-3.1-24b-instruct", name: "Mistral Small 3.1 24B Instruct" },
+    { id: "@cf/meta/llama-3.1-70b-instruct-fp8-fast", name: "Llama 3.1 70B Instruct FP8 Fast" },
+    { id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", name: "Llama 3.3 70B Instruct FP8 Fast" },
+    { id: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", name: "DeepSeek R1 Distill Qwen 32B" },
+    { id: "@cf/moonshotai/kimi-k2.5", name: "Kimi K2.5" },
     { id: "@cf/moonshotai/kimi-k2.6", name: "Kimi K2.6" },
     { id: "@cf/zai-org/glm-4.7-flash", name: "GLM 4.7 Flash" },
+    { id: "@cf/qwen/qwq-32b", name: "QwQ 32B" },
+    { id: "@cf/qwen/qwen2.5-coder-32b-instruct", name: "Qwen 2.5 Coder 32B Instruct" },
   ],
   byteplus: [
     { id: "seed-2-0-pro-260328", name: "Seed 2.0 Pro" },
@@ -555,6 +587,22 @@ export function getModelTargetFormat(aliasOrId, modelId) {
   if (!models) return null;
   const found = models.find(m => m.id === modelId);
   return found?.targetFormat || null;
+}
+
+export function getModelUpstreamId(aliasOrId, modelId) {
+  const models = PROVIDER_MODELS[aliasOrId];
+  const found = models?.find(m => m.id === modelId);
+  if (found?.upstreamModelId) return found.upstreamModelId;
+  if (aliasOrId === "cx" && typeof modelId === "string" && modelId.endsWith(CODEX_REVIEW_SUFFIX)) {
+    return modelId.slice(0, -CODEX_REVIEW_SUFFIX.length);
+  }
+  return modelId;
+}
+
+export function getModelQuotaFamily(aliasOrId, modelId) {
+  const models = PROVIDER_MODELS[aliasOrId];
+  const found = models?.find(m => m.id === modelId);
+  return found?.quotaFamily || "normal";
 }
 
 // OAuth providers that use short aliases (everything else: alias = id)
