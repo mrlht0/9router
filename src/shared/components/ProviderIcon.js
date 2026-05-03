@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import PropTypes from "prop-types";
+import Image from "next/image";
 
 export default function ProviderIcon({
   src,
