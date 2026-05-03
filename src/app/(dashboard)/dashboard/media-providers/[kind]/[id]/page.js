@@ -12,6 +12,7 @@ import ConnectionsCard from "@/app/(dashboard)/dashboard/providers/components/Co
 import ModelsCard from "@/app/(dashboard)/dashboard/providers/components/ModelsCard";
 import { TTS_PROVIDER_CONFIG } from "@/shared/constants/ttsProviders";
 import { getTtsVoicesForModel } from "open-sse/config/ttsModels.js";
+import Image from "next/image";
 
 // Shared row layout — defined outside components to avoid re-mount on re-render
 function Row({ label, children }) {
