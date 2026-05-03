@@ -1,4 +1,4 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings } from "@/lib/localDb";
+import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getApiKeyRecord, getProviderPoolById } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
@@ -304,4 +304,24 @@ export function extractApiKey(request) {
 export async function isValidApiKey(apiKey) {
   if (!apiKey) return false;
   return await validateApiKey(apiKey);
+}
+
+export async function isApiKeyAllowedForProvider(apiKey, provider) {
+  if (!apiKey || !provider) return false;
+  const record = await getApiKeyRecord(apiKey);
+  if (!record || record.isActive === false) return false;
+
+  if (record.providerPoolId) {
+    const pool = await getProviderPoolById(record.providerPoolId);
+    if (!pool) return false;
+    const poolProviders = Array.isArray(pool.providerIds) ? pool.providerIds : [];
+    return poolProviders.includes(provider);
+  }
+
+  const allowed = Array.isArray(record.allowedProviders) ? record.allowedProviders : [];
+  if (allowed.length > 0) {
+    return allowed.includes(provider);
+  }
+
+  return true; // no pool + no allowedProviders => all providers
 }

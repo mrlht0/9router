@@ -21,7 +21,7 @@ export async function PUT(request, { params }) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { isActive } = body;
+    const { isActive, allowedProviders, providerPoolId } = body;
 
     const existing = await getApiKeyById(id);
     if (!existing) {
@@ -30,6 +30,15 @@ export async function PUT(request, { params }) {
 
     const updateData = {};
     if (isActive !== undefined) updateData.isActive = isActive;
+    if (allowedProviders !== undefined) {
+      if (!Array.isArray(allowedProviders)) {
+        return NextResponse.json({ error: "allowedProviders must be an array" }, { status: 400 });
+      }
+      updateData.allowedProviders = allowedProviders;
+    }
+    if (providerPoolId !== undefined) {
+      updateData.providerPoolId = providerPoolId || null;
+    }
 
     const updated = await updateApiKey(id, updateData);
 

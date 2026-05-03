@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import PropTypes from "prop-types";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { AI_PROVIDERS } from "@/shared/constants/providers";
 
 const TUNNEL_BENEFITS = [
   { icon: "public", title: "Access Anywhere", desc: "Use your API from any network" },
@@ -25,6 +26,12 @@ export default function APIPageClient({ machineId }) {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyAllowedProviders, setNewKeyAllowedProviders] = useState([]);
+  const [providerConnections, setProviderConnections] = useState([]);
+  const [providerPools, setProviderPools] = useState([]);
+  const [newPoolName, setNewPoolName] = useState("");
+  const [newPoolProviderIds, setNewPoolProviderIds] = useState([]);
+  const [newKeyProviderPoolId, setNewKeyProviderPoolId] = useState("");
   const [createdKey, setCreatedKey] = useState(null);
 
   const [requireApiKey, setRequireApiKey] = useState(false);
@@ -216,10 +223,22 @@ export default function APIPageClient({ machineId }) {
 
   const fetchData = async () => {
     try {
-      const keysRes = await fetch("/api/keys");
+      const [keysRes, providersRes, poolsRes] = await Promise.all([
+        fetch("/api/keys"),
+        fetch("/api/providers"),
+        fetch("/api/provider-pools"),
+      ]);
       const keysData = await keysRes.json();
       if (keysRes.ok) {
         setKeys(keysData.keys || []);
+      }
+      if (providersRes.ok) {
+        const providersData = await providersRes.json();
+        setProviderConnections(providersData.connections || []);
+      }
+      if (poolsRes.ok) {
+        const poolsData = await poolsRes.json();
+        setProviderPools(poolsData.pools || []);
       }
     } catch (error) {
       console.log("Error fetching data:", error);
@@ -574,7 +593,11 @@ export default function APIPageClient({ machineId }) {
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName }),
+        body: JSON.stringify({
+          name: newKeyName,
+          allowedProviders: newKeyAllowedProviders,
+          providerPoolId: newKeyProviderPoolId || null,
+        }),
       });
       const data = await res.json();
 
@@ -582,6 +605,8 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
+        setNewKeyAllowedProviders([]);
+        setNewKeyProviderPoolId("");
         setShowAddModal(false);
       }
     } catch (error) {
@@ -621,6 +646,88 @@ export default function APIPageClient({ machineId }) {
     } catch (error) {
       console.log("Error toggling key:", error);
     }
+  };
+
+  const handleUpdateKeyProviders = async (id, allowedProviders) => {
+    try {
+      const res = await fetch(`/api/keys/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowedProviders }),
+      });
+      if (res.ok) {
+        setKeys(prev => prev.map(k => k.id === id ? { ...k, allowedProviders } : k));
+      }
+    } catch (error) {
+      console.log("Error updating key providers:", error);
+    }
+  };
+
+  const handleUpdateKeyPool = async (id, providerPoolId) => {
+    try {
+      const normalizedPoolId = providerPoolId || null;
+      const res = await fetch(`/api/keys/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerPoolId: normalizedPoolId }),
+      });
+      if (res.ok) {
+        setKeys(prev => prev.map(k => k.id === id ? { ...k, providerPoolId: normalizedPoolId } : k));
+      }
+    } catch (error) {
+      console.log("Error updating key provider pool:", error);
+    }
+  };
+
+  const handleCreateProviderPool = async () => {
+    if (!newPoolName.trim()) return;
+    try {
+      const res = await fetch("/api/provider-pools", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newPoolName, providerIds: newPoolProviderIds }),
+      });
+      if (res.ok) {
+        setNewPoolName("");
+        setNewPoolProviderIds([]);
+        await fetchData();
+      }
+    } catch (error) {
+      console.log("Error creating provider pool:", error);
+    }
+  };
+
+  const handleDeleteProviderPool = async (id) => {
+    if (!confirm("Delete this provider pool?")) return;
+    try {
+      const res = await fetch(`/api/provider-pools/${id}`, { method: "DELETE" });
+      if (res.ok) await fetchData();
+    } catch (error) {
+      console.log("Error deleting provider pool:", error);
+    }
+  };
+
+  const providerOptions = Array.from(
+    new Map(
+      providerConnections.map((connection) => {
+        const providerId = connection.provider;
+        const providerInfo = AI_PROVIDERS[providerId];
+        return [
+          providerId,
+          {
+            id: providerId,
+            name: providerInfo?.name || connection.name || providerId,
+          },
+        ];
+      })
+    ).values()
+  ).sort((a, b) => a.name.localeCompare(b.name));
+
+  const getProviderScopeText = (allowedProviders = []) => {
+    if (!allowedProviders.length) return "All providers";
+    return allowedProviders
+      .map((providerId) => AI_PROVIDERS[providerId]?.name || providerId)
+      .join(", ");
   };
 
   const maskKey = (fullKey) => {
@@ -981,6 +1088,25 @@ export default function APIPageClient({ machineId }) {
                   <p className="text-xs text-text-muted mt-1">
                     Created {new Date(key.createdAt).toLocaleDateString()}
                   </p>
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-text-muted hover:text-primary">
+                      Provider scope: {key.providerPoolId ? `Pool: ${providerPools.find((p) => p.id === key.providerPoolId)?.name || "Unknown"}` : getProviderScopeText(key.allowedProviders)}
+                    </summary>
+                    <div className="mt-2 flex flex-col gap-2">
+                      <ProviderPoolSelect
+                        providerPools={providerPools}
+                        value={key.providerPoolId || ""}
+                        onChange={(poolId) => handleUpdateKeyPool(key.id, poolId)}
+                      />
+                      {!key.providerPoolId && (
+                        <ProviderScopeSelector
+                          providerOptions={providerOptions}
+                          selectedProviders={key.allowedProviders || []}
+                          onChange={(allowedProviders) => handleUpdateKeyProviders(key.id, allowedProviders)}
+                        />
+                      )}
+                    </div>
+                  </details>
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
                   )}
@@ -1013,6 +1139,27 @@ export default function APIPageClient({ machineId }) {
         )}
       </Card>
 
+      {/* Provider Pools */}
+      <Card>
+        <h2 className="text-lg font-semibold mb-4">Provider Pools</h2>
+        <div className="flex flex-col gap-3">
+          <Input label="Pool name" value={newPoolName} onChange={(e) => setNewPoolName(e.target.value)} placeholder="e.g. Premium providers" />
+          <ProviderScopeSelector providerOptions={providerOptions} selectedProviders={newPoolProviderIds} onChange={setNewPoolProviderIds} />
+          <Button onClick={handleCreateProviderPool} disabled={!newPoolName.trim()}>Create Pool</Button>
+          <div className="flex flex-col gap-2">
+            {providerPools.map((pool) => (
+              <div key={pool.id} className="flex items-center justify-between rounded border border-border px-3 py-2">
+                <div>
+                  <p className="text-sm font-medium">{pool.name}</p>
+                  <p className="text-xs text-text-muted">{getProviderScopeText(pool.providerIds || [])}</p>
+                </div>
+                <button onClick={() => handleDeleteProviderPool(pool.id)} className="text-red-500 text-xs hover:underline">Delete</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+
       {/* Add Key Modal */}
       <Modal
         isOpen={showAddModal}
@@ -1020,6 +1167,7 @@ export default function APIPageClient({ machineId }) {
         onClose={() => {
           setShowAddModal(false);
           setNewKeyName("");
+          setNewKeyAllowedProviders([]);
         }}
       >
         <div className="flex flex-col gap-4">
@@ -1029,6 +1177,18 @@ export default function APIPageClient({ machineId }) {
             onChange={(e) => setNewKeyName(e.target.value)}
             placeholder="Production Key"
           />
+          <ProviderPoolSelect
+            providerPools={providerPools}
+            value={newKeyProviderPoolId}
+            onChange={setNewKeyProviderPoolId}
+          />
+          {!newKeyProviderPoolId && (
+            <ProviderScopeSelector
+              providerOptions={providerOptions}
+              selectedProviders={newKeyAllowedProviders}
+              onChange={setNewKeyAllowedProviders}
+            />
+          )}
           <div className="flex gap-2">
             <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim()}>
               Create
@@ -1037,6 +1197,8 @@ export default function APIPageClient({ machineId }) {
               onClick={() => {
                 setShowAddModal(false);
                 setNewKeyName("");
+                setNewKeyAllowedProviders([]);
+                setNewKeyProviderPoolId("");
               }}
               variant="ghost"
               fullWidth
@@ -1287,6 +1449,76 @@ function StatusAlert({ status, className = "" }) {
   );
 }
 
+function ProviderPoolSelect({ providerPools, value, onChange }) {
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <p className="text-sm font-medium mb-1">Provider pool</p>
+      <p className="text-xs text-text-muted mb-2">Choose a pool, or leave empty to allow all providers.</p>
+      <select
+        className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        <option value="">No pool (all providers)</option>
+        {providerPools.map((pool) => (
+          <option key={pool.id} value={pool.id}>{pool.name}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function ProviderScopeSelector({ providerOptions, selectedProviders, onChange, className = "" }) {
+  const toggleProvider = (providerId) => {
+    const next = selectedProviders.includes(providerId)
+      ? selectedProviders.filter((id) => id !== providerId)
+      : [...selectedProviders, providerId];
+    onChange(next);
+  };
+
+  return (
+    <div className={`rounded-lg border border-border p-3 ${className}`}>
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div>
+          <p className="text-sm font-medium">Allowed providers</p>
+          <p className="text-xs text-text-muted">
+            Leave empty to allow this key to use every provider.
+          </p>
+        </div>
+        {selectedProviders.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            className="text-xs text-primary hover:underline shrink-0"
+          >
+            Allow all
+          </button>
+        )}
+      </div>
+      {providerOptions.length === 0 ? (
+        <p className="text-xs text-text-muted">No providers configured yet. This key will allow all providers.</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {providerOptions.map((provider) => (
+            <button
+              key={provider.id}
+              type="button"
+              onClick={() => toggleProvider(provider.id)}
+              className={`px-2.5 py-1 rounded-full border text-xs transition-colors ${
+                selectedProviders.includes(provider.id)
+                  ? "bg-primary text-white border-primary"
+                  : "border-border text-text-muted hover:text-primary hover:border-primary/50"
+              }`}
+            >
+              {provider.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Inline tooltip, Claude Code CLI style */
 function Tooltip({ text }) {
   return (
@@ -1323,4 +1555,10 @@ function SecurityWarning({ message, action }) {
 
 APIPageClient.propTypes = {
   machineId: PropTypes.string.isRequired,
+};
+
+ProviderPoolSelect.propTypes = {
+  providerPools: PropTypes.array.isRequired,
+  value: PropTypes.string.isRequired,
+  onChange: PropTypes.func.isRequired,
 };

@@ -4,6 +4,7 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  isApiKeyAllowedForProvider,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
@@ -48,6 +49,11 @@ export async function handleImageGeneration(request) {
   if (!modelInfo.provider) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
 
   const { provider, model } = modelInfo;
+
+  if (settings.requireApiKey && apiKey) {
+    const allowed = await isApiKeyAllowedForProvider(apiKey, provider);
+    if (!allowed) return errorResponse(HTTP_STATUS.FORBIDDEN, `API key is not allowed to use provider: ${provider}`);
+  }
 
   // noAuth providers — no credential needed
   if (NO_AUTH_PROVIDERS.has(provider)) {
