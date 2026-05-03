@@ -376,6 +376,18 @@ export const PROVIDERS = {
     baseUrl: "https://api.xiaomimimo.com/v1/chat/completions",
     format: "openai"
   },
+  // AgentRouter - unified LLM gateway (New-API based), Claude-compatible /v1/messages
+  agentrouter: {
+    baseUrl: "https://agentrouter.org/v1/messages",
+    format: "claude",
+    headers: { ...CLAUDE_API_HEADERS }
+  },
+  // Bluesminds - unified LLM gateway (New-API based), Claude-compatible /v1/messages
+  bluesminds: {
+    baseUrl: "https://api.bluesminds.com/v1/messages",
+    format: "claude",
+    headers: { ...CLAUDE_API_HEADERS }
+  },
 };
 
 export const OLLAMA_LOCAL_DEFAULT_HOST = "http://localhost:11434";

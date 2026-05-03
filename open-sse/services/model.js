@@ -65,6 +65,10 @@ const ALIAS_TO_PROVIDER_ID = {
   "perplexity-web": "perplexity-web",
   mimo: "xiaomi-mimo",
   "xiaomi-mimo": "xiaomi-mimo",
+  ar: "agentrouter",
+  agentrouter: "agentrouter",
+  bm: "bluesminds",
+  bluesminds: "bluesminds",
 };
 
 /**
