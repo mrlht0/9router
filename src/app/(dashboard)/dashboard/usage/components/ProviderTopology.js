@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useCallback, useRef } from "react";
+import Image from "next/image";
 import PropTypes from "prop-types";
 import {
   ReactFlow,
