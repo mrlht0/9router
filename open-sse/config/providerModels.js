@@ -26,7 +26,7 @@ function withCodexReviewModels(models) {
   });
 }
 
-const CODEX_EFFORT_LEVELS = ['xhigh', 'high', 'low', 'none'];
+const CODEX_EFFORT_LEVELS = ['xhigh', 'high', 'medium', 'low'];
 
 function withCodexEffortVariants(modelIds) {
   const targetSet = new Set(modelIds);
