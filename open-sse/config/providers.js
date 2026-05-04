@@ -109,6 +109,18 @@ export const PROVIDERS = {
     clientId: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
     clientSecret: "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"
   },
+  canopywave: {
+    baseUrl: "https://inference.canopywave.io/v1/chat/completions",
+    format: "openai"
+  },
+  swiftrouter: {
+    baseUrl: "https://api.swiftrouter.com/v1/chat/completions",
+    format: "openai"
+  },
+  routeway: {
+    baseUrl: "https://api.routeway.ai/v1/chat/completions",
+    format: "openai"
+  },
   openrouter: {
     baseUrl: "https://openrouter.ai/api/v1/chat/completions",
     format: "openai",
@@ -374,6 +386,10 @@ export const PROVIDERS = {
   },
   "xiaomi-mimo": {
     baseUrl: "https://api.xiaomimimo.com/v1/chat/completions",
+    format: "openai"
+  },
+  "xiaomi-mimo-plan-sgp": {
+    baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions",
     format: "openai"
   },
 };

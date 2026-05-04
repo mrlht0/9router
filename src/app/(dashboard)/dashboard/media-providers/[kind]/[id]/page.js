@@ -1425,17 +1425,8 @@ export default function MediaProviderDetailPage() {
           <div className="flex-1">
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
               <h1 className="text-3xl font-semibold tracking-tight">{provider.name}</h1>
-              {!isCustom && provider.notice?.apiKeyUrl && (
-                <a
-                  href={provider.notice.apiKeyUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline inline-flex items-center gap-1"
-                >
-                  <span className="material-symbols-outlined text-sm">open_in_new</span>
-                  Get API Key
-                </a>
-              )}
+
+
             </div>
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
               {isCustom && <Badge variant="default" size="sm">Custom · {customNode?.prefix}</Badge>}
@@ -1459,31 +1450,47 @@ export default function MediaProviderDetailPage() {
         </div>
       </div>
 
-      {/* Kind-specific notice (e.g. codex/image requires Plus) */}
-      {!isCustom && provider.kindNotice?.[kind] && (
-        <div className="flex items-start gap-3 px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400">
-          <span className="material-symbols-outlined text-[20px] mt-0.5">warning</span>
-          <p className="text-sm">{provider.kindNotice[kind]}</p>
-        </div>
-      )}
-
-      {/* Provider notice text (only when there's actual text content) */}
-      {!isCustom && provider.notice?.text && !provider.deprecated && (
-        <div className="flex flex-col gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 sm:flex-row sm:items-center">
-          <span className="material-symbols-outlined text-[16px] text-blue-500 shrink-0">info</span>
-          <p className="min-w-0 flex-1 text-xs leading-relaxed text-blue-600 dark:text-blue-400">{provider.notice.text}</p>
-          {provider.notice.apiKeyUrl && (
-            <a
-              href={provider.notice.apiKeyUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex justify-center rounded bg-blue-500 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-600 sm:py-0.5"
-            >
-              Get API Key →
-            </a>
-          )}
-        </div>
-      )}
+      {/* Unified provider notice / access card */}
+      {!isCustom && (provider.deprecated || provider.kindNotice?.[kind] || provider.notice?.text || provider.notice?.apiKeyUrl || provider.notice?.signupUrl || provider.website) && (() => {
+        const isCritical = provider.deprecated;
+        const href = provider.notice?.apiKeyUrl || provider.notice?.signupUrl || provider.website;
+        const destination = provider.notice?.apiKeyUrl ? "API key page" : "provider website";
+        const message = provider.deprecated
+          ? provider.deprecationNotice
+          : (provider.kindNotice?.[kind] || provider.notice?.text || `Get your credentials from the ${destination}, then add them here to enable this provider.`);
+        return (
+          <div className={`relative overflow-hidden rounded-2xl border px-4 py-3 shadow-sm ${isCritical ? "border-amber-500/30 bg-amber-500/10" : "border-primary/20 bg-primary/10"}`}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-start gap-3">
+                <div className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl ${isCritical ? "bg-amber-500/15 text-amber-600 dark:text-amber-300" : "bg-primary/15 text-primary"}`}>
+                  <span className="material-symbols-outlined text-[18px]">{isCritical ? "warning" : "info"}</span>
+                </div>
+                <div className="min-w-0">
+                  <p className={`text-sm font-semibold ${isCritical ? "text-amber-800 dark:text-amber-200" : "text-text-main"}`}>
+                    {isCritical ? "Provider notice" : "Provider access"}
+                  </p>
+                  {message && (
+                    <p className={`mt-0.5 text-sm leading-relaxed ${isCritical ? "text-amber-700 dark:text-amber-300" : "text-text-muted"}`}>
+                      {message}
+                    </p>
+                  )}
+                </div>
+              </div>
+              {href && (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 ${isCritical ? "bg-amber-600 hover:bg-amber-700" : "bg-primary hover:bg-primary/90"}`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">open_in_new</span>
+                  {provider.notice?.apiKeyUrl ? "Get API Key" : "Open provider"}
+                </a>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Connections */}
       {!isCustom && provider.noAuth ? (

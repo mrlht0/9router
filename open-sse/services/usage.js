@@ -138,6 +138,7 @@ async function getGitHubUsage(accessToken, providerSpecificData, proxyOptions = 
       return {
         plan: data.copilot_plan,
         resetDate: data.quota_reset_date,
+        rateLimit: providerSpecificData?.lastRateLimit || null,
         quotas: {
           chat: { ...formatGitHubQuotaSnapshot(snapshots.chat), resetAt },
           completions: { ...formatGitHubQuotaSnapshot(snapshots.completions), resetAt },
@@ -153,6 +154,7 @@ async function getGitHubUsage(accessToken, providerSpecificData, proxyOptions = 
       return {
         plan: data.copilot_plan || data.access_type_sku,
         resetDate: data.limited_user_reset_date,
+        rateLimit: providerSpecificData?.lastRateLimit || null,
         quotas: {
           chat: {
             used: usedQuotas.chat || 0,
@@ -170,7 +172,7 @@ async function getGitHubUsage(accessToken, providerSpecificData, proxyOptions = 
       };
     }
 
-    return { message: "GitHub Copilot connected. Unable to parse quota data." };
+    return { message: "GitHub Copilot connected. Unable to parse quota data.", rateLimit: providerSpecificData?.lastRateLimit || null };
   } catch (error) {
     throw new Error(`Failed to fetch GitHub usage: ${error.message}`);
   }

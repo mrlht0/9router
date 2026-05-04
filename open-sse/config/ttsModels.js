@@ -53,6 +53,13 @@ export const TTS_MODELS_CONFIG = {
     },
     allVoices: VOICES_FULL,
   },
+  "xiaomi-mimo-plan-sgp": {
+    models: [
+      { id: "mimo-v2.5-tts",              name: "MiMo V2.5 TTS",              type: "tts" },
+      { id: "mimo-v2.5-tts-voiceclone",   name: "MiMo V2.5 TTS VoiceClone",   type: "tts" },
+      { id: "mimo-v2.5-tts-voicedesign",  name: "MiMo V2.5 TTS VoiceDesign",  type: "tts" },
+    ],
+  },
   elevenlabs: {
     models: [
       { id: "eleven_flash_v2_5",      name: "Flash v2.5 (Fastest)",      type: "tts" },

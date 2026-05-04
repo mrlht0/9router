@@ -36,6 +36,7 @@ export default function ProviderLimits() {
   const [expiringFirst, setExpiringFirst] = useState(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
   const [bulkToggling, setBulkToggling] = useState(false);
+  const [tokenRefreshing, setTokenRefreshing] = useState({});
 
   const intervalRef = useRef(null);
   const countdownRef = useRef(null);
@@ -112,6 +113,7 @@ export default function ProviderLimits() {
           quotas: parsedQuotas,
           plan: data.plan || null,
           message: data.message || null,
+          rateLimit: data.rateLimit || null,
           raw: data,
         },
       }));
@@ -137,6 +139,26 @@ export default function ProviderLimits() {
     },
     [fetchQuota],
   );
+
+  const refreshCodexAccessToken = useCallback(async (connectionId) => {
+    if (!connectionId || tokenRefreshing[connectionId]) return;
+    setTokenRefreshing((prev) => ({ ...prev, [connectionId]: true }));
+    try {
+      const res = await fetch(`/api/providers/${connectionId}/refresh-token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to refresh Codex token");
+      setErrors((prev) => ({ ...prev, [connectionId]: null }));
+      await fetchQuota(connectionId, "codex");
+      setLastUpdated(new Date());
+    } catch (error) {
+      setErrors((prev) => ({ ...prev, [connectionId]: error.message || "Failed to refresh Codex token" }));
+    } finally {
+      setTokenRefreshing((prev) => ({ ...prev, [connectionId]: false }));
+    }
+  }, [fetchQuota, tokenRefreshing]);
 
   const handleDeleteConnection = useCallback(async (id) => {
     if (!confirm("Delete this connection?")) return;
@@ -742,6 +764,18 @@ export default function ProviderLimits() {
                       error
                     </span>
                     <p className="mt-1.5 text-xs text-text-muted">{error}</p>
+                    {conn.provider === "codex" && /401|unauthoriz|expired|token/i.test(String(error)) && (
+                      <button
+                        type="button"
+                        onClick={() => refreshCodexAccessToken(conn.id)}
+                        disabled={!!tokenRefreshing[conn.id]}
+                        className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-500/15 dark:text-red-300 disabled:opacity-50"
+                        title="Refresh Codex access token"
+                      >
+                        <span className={`material-symbols-outlined text-[16px] ${tokenRefreshing[conn.id] ? "animate-spin" : ""}`}>{tokenRefreshing[conn.id] ? "sync" : "key"}</span>
+                        Refresh Codex Token
+                      </button>
+                    )}
                   </div>
                 ) : quota?.message ? (
                   <div className="text-center py-5">
