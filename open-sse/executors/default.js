@@ -6,13 +6,41 @@ import { getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 
+function sanitizeAnthropicMessages(body) {
+  if (!Array.isArray(body?.messages)) return body;
+
+  const messages = body.messages.map(message => {
+    if (!Array.isArray(message?.content)) return message;
+
+    const content = message.content.filter(block => {
+      if (!block || typeof block !== "object") return true;
+      // Thinking signatures are tied to the exact Anthropic response that
+      // produced them. 9Router can receive synthetic or cross-provider
+      // thinking blocks during resume/model switches; forwarding those blocks
+      // causes Anthropic to reject the request with invalid/empty thinking.
+      return block.type !== "thinking" && block.type !== "redacted_thinking";
+    });
+
+    return content.length === message.content.length ? message : { ...message, content };
+  }).filter(message => {
+    if (Array.isArray(message?.content)) return message.content.length > 0;
+    return true;
+  });
+
+  return messages.length === body.messages.length ? body : { ...body, messages };
+}
+
 export class DefaultExecutor extends BaseExecutor {
   constructor(provider) {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
   }
 
   transformRequest(model, body) {
-    return injectReasoningContent({ provider: this.provider, model, body });
+    const transformed = injectReasoningContent({ provider: this.provider, model, body });
+    if (this.provider === "claude" || this.provider?.startsWith?.("anthropic-compatible-")) {
+      return sanitizeAnthropicMessages(transformed);
+    }
+    return transformed;
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
