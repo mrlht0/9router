@@ -1,6 +1,63 @@
 # Docker
 
-This project ships with a `Dockerfile` for building and running 9Router in a container.
+This project ships with a `Dockerfile` and Docker Compose config for building and running 9Router in a container.
+
+## Docker Compose
+
+Create a local env file:
+
+```bash
+cp .env.example .env
+```
+
+Edit these values before running in production:
+
+- `JWT_SECRET`
+- `INITIAL_PASSWORD`
+- `API_KEY_SECRET`
+- `MACHINE_ID_SALT`
+
+Start 9Router:
+
+```bash
+docker compose up -d
+```
+
+The app listens at `http://localhost:20128`.
+
+View logs:
+
+```bash
+docker compose logs -f
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+Rebuild after code changes:
+
+```bash
+docker compose up -d --build
+```
+
+Compose persists data at:
+
+```text
+$HOME/.9router/db.json
+```
+
+To use a different host port, set `HOST_PORT` in `.env`, for example:
+
+```env
+HOST_PORT=20129
+```
+
+Container port remains `20128`.
+
+## Manual Docker
 
 ## Build image
 
