@@ -113,6 +113,7 @@ export default function ProviderLimits() {
           quotas: parsedQuotas,
           plan: data.plan || null,
           message: data.message || null,
+          rateLimit: data.rateLimit || null,
           raw: data,
         },
       }));

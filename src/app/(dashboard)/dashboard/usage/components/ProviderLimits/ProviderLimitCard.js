@@ -25,6 +25,7 @@ export default function ProviderLimitCard({
   onRefresh,
   onRefreshToken,
   tokenRefreshing = false,
+  rateLimit = null,
 }) {
   const [refreshing, setRefreshing] = useState(false);
 
@@ -174,6 +175,28 @@ export default function ProviderLimitCard({
             <p className="text-sm text-blue-600 dark:text-blue-400">
               {message}
             </p>
+          </div>
+        </div>
+      )}
+
+
+      {!loading && provider?.toLowerCase() === "github" && rateLimit && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+          <div className="flex items-start gap-2">
+            <span className="material-symbols-outlined text-amber-500 text-[18px]">schedule</span>
+            <div className="min-w-0 text-xs text-amber-700 dark:text-amber-300">
+              <p className="font-medium">Last GitHub rate limit observed</p>
+              <p className="mt-1 break-words">
+                model: {rateLimit.model || "-"}
+                {rateLimit.resource ? ` · resource: ${rateLimit.resource}` : ""}
+                {rateLimit.remaining !== null && rateLimit.remaining !== undefined ? ` · remaining: ${rateLimit.remaining}` : ""}
+                {rateLimit.limit !== null && rateLimit.limit !== undefined ? ` / ${rateLimit.limit}` : ""}
+              </p>
+              <p className="mt-1">
+                {rateLimit.retryAfter ? `Retry-After: ${rateLimit.retryAfter}` : "Retry-After: -"}
+                {rateLimit.resetAt ? ` · reset: ${new Date(rateLimit.resetAt).toLocaleString()}` : ""}
+              </p>
+            </div>
           </div>
         </div>
       )}

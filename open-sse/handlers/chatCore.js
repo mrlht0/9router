@@ -10,6 +10,7 @@ import { createErrorResult, parseUpstreamError, formatProviderError } from "../u
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
+import { updateProviderConnection } from "@/lib/localDb.js";
 import { getExecutor } from "../executors/index.js";
 import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
 import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
@@ -18,6 +19,48 @@ import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/strea
 import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
+
+function parseRetryAfterToResetAt(value) {
+  if (!value) return null;
+  const text = String(value).trim();
+  if (/^\d+$/.test(text)) return new Date(Date.now() + Number(text) * 1000).toISOString();
+  const t = new Date(text).getTime();
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+async function trackGitHubRateLimitHeaders({ provider, connectionId, model, response, message, credentials }) {
+  if (provider !== "github" || response?.status !== 429 || !connectionId) return;
+  const h = response.headers;
+  const retryAfter = h.get("retry-after");
+  const resetHeader = h.get("x-ratelimit-reset");
+  const limit = h.get("x-ratelimit-limit");
+  const remaining = h.get("x-ratelimit-remaining");
+  const resource = h.get("x-ratelimit-resource");
+  const resetAt = resetHeader ? parseRetryAfterToResetAt(resetHeader) : parseRetryAfterToResetAt(retryAfter);
+  const rateLimit = {
+    provider: "github",
+    model,
+    status: 429,
+    retryAfter: retryAfter || null,
+    limit: limit !== null ? Number(limit) : null,
+    remaining: remaining !== null ? Number(remaining) : null,
+    resource: resource || null,
+    resetAt,
+    message: message || null,
+    lastSeenAt: new Date().toISOString(),
+  };
+  try {
+    await updateProviderConnection(connectionId, {
+      providerSpecificData: {
+        ...(credentials?.providerSpecificData || {}),
+        lastRateLimit: rateLimit,
+      }
+    });
+    if (credentials?.providerSpecificData) credentials.providerSpecificData.lastRateLimit = rateLimit;
+  } catch (e) {
+    console.warn(`[RATE_LIMIT] Failed to persist GitHub rate limit headers: ${e.message}`);
+  }
+}
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -215,6 +258,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
+    await trackGitHubRateLimitHeaders({ provider, connectionId, model, response: providerResponse, message, credentials });
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => {});
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
