@@ -65,6 +65,10 @@ const ALIAS_TO_PROVIDER_ID = {
   "perplexity-web": "perplexity-web",
   mimo: "xiaomi-mimo",
   "xiaomi-mimo": "xiaomi-mimo",
+  "mimo-sgp": "xiaomi-mimo-plan-sgp",
+  "xiaomi-mimo-plan-sgp": "xiaomi-mimo-plan-sgp",
+  cwv: "canopywave",
+  canopywave: "canopywave",
   cf: "cloudflare-ai",
   "cloudflare-ai": "cloudflare-ai",
   // Image/video providers

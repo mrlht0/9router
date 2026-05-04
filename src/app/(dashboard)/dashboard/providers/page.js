@@ -399,13 +399,13 @@ export default function ProvidersPage() {
         </div>
       </div> */}
 
-      {/* API Key Compatible Providers — dynamic (OpenAI/Anthropic compatible) */}
+      {/* Custom Providers — dynamic (OpenAI/Anthropic compatible) */}
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
-            API Key Compatible Providers{" "}
+            Custom Providers
           </h2>
-          <div className="grid grid-cols-1 gap-2 sm:flex sm:w-auto">
+          <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:flex sm:w-auto">
             {/* {(compatibleProviders.length > 0 || anthropicCompatibleProviders.length > 0) && (
               <button
                 onClick={() => handleBatchTest("compatible")}
@@ -426,18 +426,18 @@ export default function ProvidersPage() {
               size="sm"
               icon="add"
               onClick={() => setShowAddAnthropicCompatibleModal(true)}
-              className="w-full sm:w-auto"
+              className="w-full justify-center rounded-xl px-3 py-2 shadow-sm sm:w-auto"
             >
-              Add Anthropic Compatible
+              Anthropic Compatible
             </Button>
             <Button
               size="sm"
               variant="secondary"
               icon="add"
               onClick={() => setShowAddCompatibleModal(true)}
-              className="w-full !bg-white !text-black hover:!bg-gray-100 sm:w-auto"
+              className="w-full justify-center rounded-xl border border-border-subtle bg-surface-2 px-3 py-2 text-text-main shadow-sm hover:border-primary/30 hover:bg-primary/10 hover:text-primary sm:w-auto"
             >
-              Add OpenAI Compatible
+              OpenAI Compatible
             </Button>
           </div>
         </div>
@@ -882,7 +882,7 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
   };
 
   return (
-    <Modal isOpen={isOpen} title="Add OpenAI Compatible" onClose={onClose}>
+    <Modal isOpen={isOpen} title="OpenAI Compatible" onClose={onClose}>
       <div className="flex flex-col gap-4">
         <Input
           label="Name"
@@ -1072,7 +1072,7 @@ function AddAnthropicCompatibleModal({ isOpen, onClose, onCreated }) {
   };
 
   return (
-    <Modal isOpen={isOpen} title="Add Anthropic Compatible" onClose={onClose}>
+    <Modal isOpen={isOpen} title="Anthropic Compatible" onClose={onClose}>
       <div className="flex flex-col gap-4">
         <Input
           label="Name"

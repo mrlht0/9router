@@ -762,17 +762,8 @@ export default function ProviderDetailPage() {
           <div className="min-w-0">
             <div className="flex items-center gap-3 flex-wrap">
               <h1 className="truncate text-2xl font-semibold tracking-tight sm:text-3xl">{providerInfo.name}</h1>
-              {(providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website) && (
-                <a
-                  href={providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline inline-flex items-center gap-1"
-                >
-                  <span className="material-symbols-outlined text-sm">open_in_new</span>
-                  {providerInfo.notice?.apiKeyUrl ? "Get API Key" : "Sign up / Learn more"}
-                </a>
-              )}
+
+
             </div>
             <p className="text-text-muted">
               {connections.length} connection{connections.length === 1 ? "" : "s"}
@@ -781,29 +772,46 @@ export default function ProviderDetailPage() {
         </div>
       </div>
 
-      {providerInfo.deprecated && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
-          <span className="material-symbols-outlined text-[16px] text-yellow-500 mt-0.5 shrink-0">warning</span>
-          <p className="text-xs text-red-600 dark:text-yellow-400 leading-relaxed">{providerInfo.deprecationNotice}</p>
-        </div>
-      )}
-
-      {providerInfo.notice?.text && !providerInfo.deprecated && (
-        <div className="flex flex-col gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 sm:flex-row sm:items-center">
-          <span className="material-symbols-outlined text-[16px] text-blue-500 shrink-0">info</span>
-          <p className="min-w-0 flex-1 text-xs leading-relaxed text-blue-600 dark:text-blue-400">{providerInfo.notice.text}</p>
-          {providerInfo.notice.apiKeyUrl && (
-            <a
-              href={providerInfo.notice.apiKeyUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex justify-center rounded bg-blue-500 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-600 sm:py-0.5"
-            >
-              Get API Key →
-            </a>
-          )}
-        </div>
-      )}
+      {(providerInfo.deprecated || providerInfo.notice?.text || providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website) && (() => {
+        const isCritical = providerInfo.deprecated;
+        const href = providerInfo.notice?.apiKeyUrl || providerInfo.notice?.signupUrl || providerInfo.website;
+        const destination = providerInfo.notice?.apiKeyUrl ? "API key page" : "provider website";
+        const message = providerInfo.deprecated
+          ? providerInfo.deprecationNotice
+          : (providerInfo.notice?.text || `Get your credentials from the ${destination}, then add them here to enable this provider.`);
+        return (
+          <div className={`relative overflow-hidden rounded-2xl border px-4 py-3 shadow-sm ${isCritical ? "border-amber-500/30 bg-amber-500/10" : "border-primary/20 bg-primary/10"}`}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-start gap-3">
+                <div className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl ${isCritical ? "bg-amber-500/15 text-amber-600 dark:text-amber-300" : "bg-primary/15 text-primary"}`}>
+                  <span className="material-symbols-outlined text-[18px]">{isCritical ? "warning" : "info"}</span>
+                </div>
+                <div className="min-w-0">
+                  <p className={`text-sm font-semibold ${isCritical ? "text-amber-800 dark:text-amber-200" : "text-text-main"}`}>
+                    {isCritical ? "Provider notice" : "Provider access"}
+                  </p>
+                  {message && (
+                    <p className={`mt-0.5 text-sm leading-relaxed ${isCritical ? "text-amber-700 dark:text-amber-300" : "text-text-muted"}`}>
+                      {message}
+                    </p>
+                  )}
+                </div>
+              </div>
+              {href && (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 ${isCritical ? "bg-amber-600 hover:bg-amber-700" : "bg-primary hover:bg-primary/90"}`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">open_in_new</span>
+                  {providerInfo.notice?.apiKeyUrl ? "Get API Key" : "Open provider"}
+                </a>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {isCompatible && providerNode && (
         <Card>
@@ -820,7 +828,6 @@ export default function ProviderDetailPage() {
                 size="sm"
                 icon="add"
                 onClick={() => setShowAddApiKeyModal(true)}
-                disabled={connections.length > 0}
                 className="w-full sm:w-auto"
               >
                 Add
@@ -857,7 +864,7 @@ export default function ProviderDetailPage() {
           </div>
           {connections.length > 0 && (
             <p className="text-sm text-text-muted">
-              Only one connection is allowed per compatible node. Add another node if you need more connections.
+              Multiple API keys can be added to this compatible provider and toggled independently.
             </p>
           )}
         </Card>

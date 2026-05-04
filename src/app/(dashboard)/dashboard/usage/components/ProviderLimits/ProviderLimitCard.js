@@ -23,6 +23,8 @@ export default function ProviderLimitCard({
   loading = false,
   error = null,
   onRefresh,
+  onRefreshToken,
+  tokenRefreshing = false,
 }) {
   const [refreshing, setRefreshing] = useState(false);
 
@@ -51,6 +53,8 @@ export default function ProviderLimitCard({
 
   const providerColor = getProviderColor();
   const planVariant = planVariants[plan?.toLowerCase()] || "default";
+  const isCodex = provider?.toLowerCase() === "codex";
+  const isAuthError = error && /401|unauthoriz|expired|token/i.test(String(error));
 
   return (
     <Card padding="md" className="flex flex-col gap-4">
@@ -87,21 +91,37 @@ export default function ProviderLimitCard({
           </div>
         </div>
 
-        {/* Refresh Button */}
-        <button
-          onClick={handleRefresh}
-          disabled={refreshing || loading}
-          className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Refresh quota"
-        >
-          <span
-            className={`material-symbols-outlined text-[20px] text-text-muted ${
-              refreshing || loading ? "animate-spin" : ""
-            }`}
+        <div className="flex items-center gap-1.5">
+          {isCodex && onRefreshToken && (
+            <button
+              onClick={onRefreshToken}
+              disabled={tokenRefreshing}
+              className="inline-flex items-center gap-1 rounded-lg border border-primary/20 bg-primary/10 px-2.5 py-2 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Refresh Codex access token"
+            >
+              <span className={`material-symbols-outlined text-[16px] ${tokenRefreshing ? "animate-spin" : ""}`}>
+                {tokenRefreshing ? "sync" : "key"}
+              </span>
+              <span className="hidden sm:inline">Refresh Token</span>
+            </button>
+          )}
+
+          {/* Refresh Quota Button */}
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing || loading}
+            className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Refresh quota only"
           >
-            refresh
-          </span>
-        </button>
+            <span
+              className={`material-symbols-outlined text-[20px] text-text-muted ${
+                refreshing || loading ? "animate-spin" : ""
+              }`}
+            >
+              refresh
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* Loading State */}
@@ -125,7 +145,21 @@ export default function ProviderLimitCard({
             <span className="material-symbols-outlined text-red-500 text-[20px]">
               error
             </span>
-            <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+              {isCodex && isAuthError && onRefreshToken && (
+                <button
+                  onClick={onRefreshToken}
+                  disabled={tokenRefreshing}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-500/15 dark:text-red-300 disabled:opacity-50"
+                >
+                  <span className={`material-symbols-outlined text-[16px] ${tokenRefreshing ? "animate-spin" : ""}`}>
+                    {tokenRefreshing ? "sync" : "key"}
+                  </span>
+                  Refresh Codex Token
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
