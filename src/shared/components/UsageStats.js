@@ -432,6 +432,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             activeRequests={stats.activeRequests || []}
             lastProvider={stats.recentRequests?.[0]?.provider || ""}
             errorProvider={stats.errorProvider || ""}
+            recentRequests={stats.recentRequests || []}
           />
           <RecentRequests requests={stats.recentRequests || []} />
         </div>
