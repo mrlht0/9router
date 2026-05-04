@@ -14,6 +14,7 @@ const TUNNEL_BENEFITS = [
 
 const TUNNEL_PING_INTERVAL_MS = 2000;
 const TUNNEL_PING_MAX_MS = 300000;
+const STATUS_POLL_INTERVAL_MS = 5000;
 
 const CAVEMAN_LEVELS = [
   { id: "lite", label: "Lite", desc: "Drop filler, keep grammar" },
@@ -74,14 +75,42 @@ export default function APIPageClient({ machineId }) {
   useEffect(() => {
     fetchData();
     loadSettings();
+    // Poll status periodically + on tab visible to sync after watchdog restarts
+    const interval = setInterval(() => { syncTunnelStatus(); }, STATUS_POLL_INTERVAL_MS);
+    const onVisible = () => { if (!document.hidden) syncTunnelStatus(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
+
+  // Trust user intent (settingsEnabled): UI stays "enabled" while watchdog restarts process
+  const syncTunnelStatus = async () => {
+    try {
+      const statusRes = await fetch("/api/tunnel/status", { cache: "no-store" });
+      if (!statusRes.ok) return;
+      const data = await statusRes.json();
+      const tEnabled = data.tunnel?.settingsEnabled ?? data.tunnel?.enabled ?? false;
+      const tUrl = data.tunnel?.tunnelUrl || "";
+      const tPublicUrl = data.tunnel?.publicUrl || "";
+      setTunnelUrl(tUrl);
+      setTunnelPublicUrl(tPublicUrl);
+      setTunnelEnabled(tEnabled);
+
+      const tsEn = data.tailscale?.settingsEnabled ?? data.tailscale?.enabled ?? false;
+      const tsUrlVal = data.tailscale?.tunnelUrl || "";
+      setTsUrl(tsUrlVal);
+      setTsEnabled(tsEn);
+    } catch { /* ignore poll errors */ }
+  };
 
   const loadSettings = async () => {
     setTunnelChecking(true);
     try {
       const [settingsRes, statusRes] = await Promise.all([
         fetch("/api/settings"),
-        fetch("/api/tunnel/status")
+        fetch("/api/tunnel/status", { cache: "no-store" })
       ]);
       if (settingsRes.ok) {
         const data = await settingsRes.json();
@@ -95,55 +124,30 @@ export default function APIPageClient({ machineId }) {
       }
       if (statusRes.ok) {
         const data = await statusRes.json();
-        const tEnabled = data.tunnel?.enabled || false;
+        const tEnabled = data.tunnel?.settingsEnabled ?? data.tunnel?.enabled ?? false;
         const tUrl = data.tunnel?.tunnelUrl || "";
         const tPublicUrl = data.tunnel?.publicUrl || "";
         setTunnelUrl(tUrl);
         setTunnelPublicUrl(tPublicUrl);
-        const tsEn = data.tailscale?.enabled || false;
+        // Trust user intent: stays enabled while watchdog restores process
+        setTunnelEnabled(tEnabled);
+
+        const tsEn = data.tailscale?.settingsEnabled ?? data.tailscale?.enabled ?? false;
         const tsUrlVal = data.tailscale?.tunnelUrl || "";
         setTsUrl(tsUrlVal);
+        setTsEnabled(tsEn);
 
-        if (tsEn && tsUrlVal) {
-          setTsLoading(true);
-          setTsProgress("Checking Tailscale...");
-          const tsHealthUrl = `${tsUrlVal}/api/health`;
-          try {
-            const tsPing = await fetch(tsHealthUrl, { mode: "no-cors", cache: "no-store" });
-            if (tsPing.ok || tsPing.type === "opaque") {
-              setTsEnabled(true);
-            } else {
-              const ok = await pingTsHealth(tsUrlVal);
-              setTsEnabled(ok);
-              if (!ok) setTsStatus({ type: "warning", message: "Tailscale not reachable." });
-            }
-          } catch {
-            const ok = await pingTsHealth(tsUrlVal);
-            setTsEnabled(ok);
-            if (!ok) setTsStatus({ type: "warning", message: "Tailscale not reachable." });
-          } finally {
-            setTsLoading(false);
-            setTsProgress("");
-          }
-        } else {
-          setTsEnabled(tsEn);
-        }
-
+        // Background reachability probes (non-blocking, only show warning)
         if (tEnabled && (tPublicUrl || tUrl)) {
-          // Ping once to verify reachable
           const healthUrl = `${tPublicUrl || tUrl}/api/health`;
-          try {
-            const ping = await fetch(healthUrl, { cache: "no-store" });
-            if (ping.ok) {
-              setTunnelEnabled(true);
-            } else {
-              pingTunnelHealth(tPublicUrl || tUrl);
-            }
-          } catch {
-            pingTunnelHealth(tPublicUrl || tUrl);
-          }
-        } else {
-          setTunnelEnabled(tEnabled);
+          fetch(healthUrl, { cache: "no-store" })
+            .then((r) => { if (!r.ok) setTunnelStatus({ type: "warning", message: "Tunnel reconnecting..." }); })
+            .catch(() => setTunnelStatus({ type: "warning", message: "Tunnel reconnecting..." }));
+        }
+        if (tsEn && tsUrlVal) {
+          fetch(`${tsUrlVal}/api/health`, { mode: "no-cors", cache: "no-store" })
+            .then((r) => { if (!(r.ok || r.type === "opaque")) setTsStatus({ type: "warning", message: "Tailscale reconnecting..." }); })
+            .catch(() => setTsStatus({ type: "warning", message: "Tailscale reconnecting..." }));
         }
       }
     } catch (error) {
@@ -661,7 +665,10 @@ export default function APIPageClient({ machineId }) {
     <div className="flex flex-col gap-8">
       {/* Endpoint Card */}
       <Card>
-        <h2 className="text-lg font-semibold mb-4">API Endpoint</h2>
+        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <span className="material-symbols-outlined text-primary">api</span>
+          API Endpoint
+        </h2>
 
         {/* Endpoint rows */}
         <div className="flex flex-col gap-2">
@@ -847,7 +854,10 @@ export default function APIPageClient({ machineId }) {
       {/* Token Saver (RTK + Caveman) */}
       <Card id="rtk">
         <div className="flex items-center justify-between mb-2">
-          <h2 className="text-lg font-semibold">Token Saver</h2>
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            <span className="material-symbols-outlined text-primary">bolt</span>
+            Token Saver
+          </h2>
         </div>
         <div className="flex items-center justify-between pt-2 pb-4 border-b border-border gap-4">
           <div className="min-w-0 flex-1">
@@ -918,7 +928,10 @@ export default function APIPageClient({ machineId }) {
       {/* API Keys */}
       <Card id="require-api-key">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">API Keys</h2>
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            <span className="material-symbols-outlined text-primary">vpn_key</span>
+            API Keys
+          </h2>
           <Button icon="add" onClick={() => setShowAddModal(true)}>
             Create Key
           </Button>
