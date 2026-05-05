@@ -8,18 +8,25 @@ export const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
   // Claude rejects these in VALIDATED mode
   "default", "examples",
   // JSON Schema meta keywords
-  "$schema", "$defs", "definitions", "const", "$ref", "$comment",
+  "$schema", "$id", "$defs", "definitions", "const", "$ref", "$comment",
   // Object validation keywords (not supported)
   "additionalProperties", "propertyNames", "patternProperties", "enumDescriptions",
+  "unevaluatedProperties", "unevaluatedItems",
   // Complex schema keywords (handled by flattenAnyOfOneOf/mergeAllOf)
   "anyOf", "oneOf", "allOf", "not",
   // Dependency keywords (not supported)
   "dependencies", "dependentSchemas", "dependentRequired",
   // Other unsupported keywords
-  "title", "if", "then", "else", "contentMediaType", "contentEncoding",
+  "title", "if", "then", "else", "contains", "minContains", "maxContains",
+  "prefixItems", "contentMediaType", "contentEncoding",
   // UI/Styling properties (from Cursor tools - NOT JSON Schema standard)
   "cornerRadius", "fillColor", "fontFamily", "fontSize", "fontWeight",
   "gap", "padding", "strokeColor", "strokeThickness", "textColor"
+];
+
+const DESCRIPTION_HINT_CONSTRAINTS = [
+  "minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
+  "pattern", "minItems", "maxItems", "format", "default", "examples"
 ];
 
 // Default safety settings
@@ -102,19 +109,75 @@ export function generateProjectId() {
   return `${adj}-${noun}-${crypto.randomUUID().slice(0, 5)}`;
 }
 
-// Helper: Remove unsupported keywords recursively from object/array
-// Also strips all vendor extension fields (x- prefixed) not supported by Gemini
-function removeUnsupportedKeywords(obj, keywords) {
+function appendDescriptionHint(obj, hint) {
+  if (!obj || typeof obj !== "object" || !hint) return;
+
+  const description = typeof obj.description === "string" ? obj.description : "";
+  if (description.includes(hint)) return;
+  obj.description = description ? `${description} (${hint})` : hint;
+}
+
+function schemaTypeLabel(schema) {
+  if (!schema || typeof schema !== "object") return "unknown";
+  if (Array.isArray(schema.type)) return schema.type.filter(t => t !== "null").join(" | ") || "null";
+  if (typeof schema.type === "string") return schema.type;
+  if (schema.properties) return "object";
+  if (schema.items) return "array";
+  if (schema.const !== undefined || schema.enum) return "string";
+  return "unknown";
+}
+
+function formatHintValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(formatHintValue).join(", ");
+  }
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function refName(ref) {
+  const tail = ref.includes("/") ? ref.split("/").pop() : ref;
+  return tail ? decodeURIComponent(tail.replace(/~1/g, "/").replace(/~0/g, "~")) : ref;
+}
+
+// Helper: Remove unsupported keywords recursively from object/array.
+// The `properties` object maps user-facing property names to schemas, so those
+// keys must be preserved even when a property name matches an unsupported keyword.
+// Also strips all vendor extension fields (x- prefixed) not supported by Gemini.
+function removeUnsupportedKeywords(obj, keywords, insideProperties = false) {
   if (!obj || typeof obj !== "object") return;
+
+  if (insideProperties) {
+    for (const propSchema of Object.values(obj)) {
+      if (propSchema && typeof propSchema === "object") {
+        removeUnsupportedKeywords(propSchema, keywords, false);
+      }
+    }
+    return;
+  }
 
   if (Array.isArray(obj)) {
     for (const item of obj) {
-      removeUnsupportedKeywords(item, keywords);
+      removeUnsupportedKeywords(item, keywords, false);
     }
     return;
   }
 
   for (const key of Object.keys(obj)) {
+    if (key === "properties") {
+      const value = obj[key];
+      if (value && typeof value === "object") {
+        removeUnsupportedKeywords(value, keywords, true);
+      }
+      continue;
+    }
+
     if (keywords.includes(key) || key.startsWith("x-")) {
       delete obj[key];
       continue;
@@ -122,7 +185,7 @@ function removeUnsupportedKeywords(obj, keywords) {
 
     const value = obj[key];
     if (value && typeof value === "object") {
-      removeUnsupportedKeywords(value, keywords);
+      removeUnsupportedKeywords(value, keywords, false);
     }
   }
 }
@@ -130,6 +193,13 @@ function removeUnsupportedKeywords(obj, keywords) {
 // Convert const to enum
 function convertConstToEnum(obj) {
   if (!obj || typeof obj !== "object") return;
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      convertConstToEnum(item);
+    }
+    return;
+  }
 
   if (obj.const !== undefined && !obj.enum) {
     obj.enum = [obj.const];
@@ -143,9 +213,50 @@ function convertConstToEnum(obj) {
   }
 }
 
+// Convert $ref and unsupported validation constraints to natural-language hints
+// before later phases remove the strict JSON Schema keywords Antigravity rejects.
+function moveUnsupportedSemanticsToDescription(obj) {
+  if (!obj || typeof obj !== "object") return;
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      moveUnsupportedSemanticsToDescription(item);
+    }
+    return;
+  }
+
+  if (typeof obj.$ref === "string") {
+    appendDescriptionHint(obj, `See: ${refName(obj.$ref)}`);
+    if (!obj.type) obj.type = "object";
+  }
+
+  if (obj.additionalProperties === false) {
+    appendDescriptionHint(obj, "No extra properties allowed");
+  }
+
+  for (const constraint of DESCRIPTION_HINT_CONSTRAINTS) {
+    if (obj[constraint] !== undefined) {
+      appendDescriptionHint(obj, `${constraint}: ${formatHintValue(obj[constraint])}`);
+    }
+  }
+
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === "object") {
+      moveUnsupportedSemanticsToDescription(value);
+    }
+  }
+}
+
 // Convert enum values to strings (Gemini requires string enum values + explicit type:"string")
 function convertEnumValuesToStrings(obj) {
   if (!obj || typeof obj !== "object") return;
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      convertEnumValuesToStrings(item);
+    }
+    return;
+  }
 
   if (obj.enum && Array.isArray(obj.enum)) {
     obj.enum = obj.enum.map(v => String(v));
@@ -162,14 +273,43 @@ function convertEnumValuesToStrings(obj) {
   }
 }
 
+function addEnumHints(obj) {
+  if (!obj || typeof obj !== "object") return;
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      addEnumHints(item);
+    }
+    return;
+  }
+
+  if (Array.isArray(obj.enum) && obj.enum.length > 1 && obj.enum.length <= 10) {
+    appendDescriptionHint(obj, `Allowed: ${obj.enum.map(v => String(v)).join(", ")}`);
+  }
+
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === "object") {
+      addEnumHints(value);
+    }
+  }
+}
+
 // Merge allOf schemas
 function mergeAllOf(obj) {
   if (!obj || typeof obj !== "object") return;
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      mergeAllOf(item);
+    }
+    return;
+  }
 
   if (obj.allOf && Array.isArray(obj.allOf)) {
     const merged = {};
 
     for (const item of obj.allOf) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
       if (item.properties) {
         if (!merged.properties) merged.properties = {};
         Object.assign(merged.properties, item.properties);
@@ -182,11 +322,22 @@ function mergeAllOf(obj) {
           }
         }
       }
+
+      for (const [key, value] of Object.entries(item)) {
+        if (key !== "properties" && key !== "required" && merged[key] === undefined) {
+          merged[key] = value;
+        }
+      }
     }
 
     delete obj.allOf;
     if (merged.properties) obj.properties = { ...obj.properties, ...merged.properties };
-    if (merged.required) obj.required = [...(obj.required || []), ...merged.required];
+    if (merged.required) obj.required = Array.from(new Set([...(obj.required || []), ...merged.required]));
+    for (const [key, value] of Object.entries(merged)) {
+      if (key !== "properties" && key !== "required" && obj[key] === undefined) {
+        obj[key] = value;
+      }
+    }
   }
 
   for (const value of Object.values(obj)) {
@@ -223,27 +374,98 @@ function selectBest(items) {
   return bestIdx;
 }
 
+function tryMergeEnumFromUnion(items) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+
+  const values = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    if (item.type === "null") continue;
+
+    if (item.const !== undefined) {
+      values.push(item.const);
+      continue;
+    }
+
+    if (Array.isArray(item.enum) && item.enum.length > 0) {
+      values.push(...item.enum);
+      continue;
+    }
+
+    return null;
+  }
+
+  return values.length > 0 ? Array.from(new Set(values.map(v => String(v)))) : null;
+}
+
+function collectUnionTypeHint(items) {
+  const types = [];
+  for (const item of items) {
+    const label = schemaTypeLabel(item);
+    if (label && label !== "unknown") {
+      types.push(label);
+    }
+  }
+
+  return Array.from(new Set(types));
+}
+
 // Flatten anyOf/oneOf
 function flattenAnyOfOneOf(obj) {
   if (!obj || typeof obj !== "object") return;
 
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      flattenAnyOfOneOf(item);
+    }
+    return;
+  }
+
   if (obj.anyOf && Array.isArray(obj.anyOf) && obj.anyOf.length > 0) {
-    const nonNullSchemas = obj.anyOf.filter(s => s && s.type !== "null");
+    const unionTypes = collectUnionTypeHint(obj.anyOf);
+    const mergedEnum = tryMergeEnumFromUnion(obj.anyOf);
+    if (mergedEnum) {
+      delete obj.anyOf;
+      obj.type = "string";
+      obj.enum = mergedEnum;
+      if (unionTypes.length > 1) appendDescriptionHint(obj, `Accepts: ${unionTypes.join(" | ")}`);
+    }
+    const nonNullSchemas = obj.anyOf?.filter(s => s && s.type !== "null") || [];
     if (nonNullSchemas.length > 0) {
       const bestIdx = selectBest(nonNullSchemas);
       const selected = nonNullSchemas[bestIdx];
       delete obj.anyOf;
+      const description = obj.description;
+      flattenAnyOfOneOf(selected);
       Object.assign(obj, selected);
+      if (description) obj.description = selected.description && selected.description !== description
+        ? `${description} (${selected.description})`
+        : description;
+      if (unionTypes.length > 1) appendDescriptionHint(obj, `Accepts: ${unionTypes.join(" | ")}`);
     }
   }
 
   if (obj.oneOf && Array.isArray(obj.oneOf) && obj.oneOf.length > 0) {
-    const nonNullSchemas = obj.oneOf.filter(s => s && s.type !== "null");
+    const unionTypes = collectUnionTypeHint(obj.oneOf);
+    const mergedEnum = tryMergeEnumFromUnion(obj.oneOf);
+    if (mergedEnum) {
+      delete obj.oneOf;
+      obj.type = "string";
+      obj.enum = mergedEnum;
+      if (unionTypes.length > 1) appendDescriptionHint(obj, `Accepts: ${unionTypes.join(" | ")}`);
+    }
+    const nonNullSchemas = obj.oneOf?.filter(s => s && s.type !== "null") || [];
     if (nonNullSchemas.length > 0) {
       const bestIdx = selectBest(nonNullSchemas);
       const selected = nonNullSchemas[bestIdx];
       delete obj.oneOf;
+      const description = obj.description;
+      flattenAnyOfOneOf(selected);
       Object.assign(obj, selected);
+      if (description) obj.description = selected.description && selected.description !== description
+        ? `${description} (${selected.description})`
+        : description;
+      if (unionTypes.length > 1) appendDescriptionHint(obj, `Accepts: ${unionTypes.join(" | ")}`);
     }
   }
 
@@ -258,14 +480,49 @@ function flattenAnyOfOneOf(obj) {
 function flattenTypeArrays(obj) {
   if (!obj || typeof obj !== "object") return;
 
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      flattenTypeArrays(item);
+    }
+    return;
+  }
+
   if (obj.type && Array.isArray(obj.type)) {
+    const hasNull = obj.type.includes("null");
     const nonNullTypes = obj.type.filter(t => t !== "null");
     obj.type = nonNullTypes.length > 0 ? nonNullTypes[0] : "string";
+    if (nonNullTypes.length > 1) {
+      appendDescriptionHint(obj, `Accepts: ${nonNullTypes.join(" | ")}`);
+    }
+    if (hasNull) {
+      appendDescriptionHint(obj, "nullable");
+    }
   }
 
   for (const value of Object.values(obj)) {
     if (value && typeof value === "object") {
       flattenTypeArrays(value);
+    }
+  }
+}
+
+function ensureArrayItems(obj) {
+  if (!obj || typeof obj !== "object") return;
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      ensureArrayItems(item);
+    }
+    return;
+  }
+
+  if (obj.type === "array" && !obj.items) {
+    obj.items = { type: "string" };
+  }
+
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === "object") {
+      ensureArrayItems(value);
     }
   }
 }
@@ -279,12 +536,16 @@ export function cleanJSONSchemaForAntigravity(schema) {
 
   // Phase 1: Convert and prepare
   convertConstToEnum(cleaned);
+  moveUnsupportedSemanticsToDescription(cleaned);
   convertEnumValuesToStrings(cleaned);
 
   // Phase 2: Flatten complex structures
   mergeAllOf(cleaned);
   flattenAnyOfOneOf(cleaned);
   flattenTypeArrays(cleaned);
+  ensureArrayItems(cleaned);
+  convertEnumValuesToStrings(cleaned);
+  addEnumHints(cleaned);
 
   // Phase 3: Remove all unsupported keywords at ALL levels (including inside arrays)
   removeUnsupportedKeywords(cleaned, UNSUPPORTED_SCHEMA_CONSTRAINTS);
@@ -342,4 +603,3 @@ export function cleanJSONSchemaForAntigravity(schema) {
 
   return cleaned;
 }
-

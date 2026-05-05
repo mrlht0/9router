@@ -65,24 +65,26 @@ describe("GET /api/oauth/cursor/auto-import", () => {
 
   // ── macOS path probing ────────────────────────────────────────────────
 
-  it("returns not-found when no macOS cursor db paths are accessible", async () => {
+  it("returns checked locations when no macOS cursor db paths are accessible", async () => {
     vi.mocked(fsPromises.access).mockRejectedValue(new Error("ENOENT"));
 
     const response = await GET();
 
     expect(response.body.found).toBe(false);
-    expect(response.body.error).toContain("Cursor database not found in known macOS locations");
+    expect(response.body.error).toContain("Cursor database not found. Checked locations:");
+    expect(response.body.error).toContain("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    expect(response.body.error).toContain("Library/Application Support/Cursor - Insiders/User/globalStorage/state.vscdb");
   });
 
-  it("returns descriptive error if macOS db file exists but cannot be opened", async () => {
+  it("falls back to manual entry if macOS db exists but cannot be opened automatically", async () => {
     vi.mocked(fsPromises.access).mockResolvedValue();
     mockDbInstance.__throwOnConstruct = true;
 
     const response = await GET();
 
     expect(response.body.found).toBe(false);
-    expect(response.body.error).toContain("could not open it");
-    expect(response.body.error).toContain("SQLITE_CANTOPEN");
+    expect(response.body.windowsManual).toBe(true);
+    expect(response.body.dbPath).toContain("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
   });
 
   // ── Token extraction ──────────────────────────────────────────────────
@@ -144,7 +146,7 @@ describe("GET /api/oauth/cursor/auto-import", () => {
     expect(response.body.machineId).toBe("fallback-machine");
   });
 
-  it("returns login-prompt error when tokens are missing even after fallback", async () => {
+  it("falls back to manual entry when tokens are missing even after fallback", async () => {
     vi.mocked(fsPromises.access).mockResolvedValue();
     mockDbInstance.prepare.mockReturnValue({
       all: vi.fn().mockReturnValue([]),
@@ -153,12 +155,13 @@ describe("GET /api/oauth/cursor/auto-import", () => {
     const response = await GET();
 
     expect(response.body.found).toBe(false);
-    expect(response.body.error).toContain("Please login to Cursor IDE first");
+    expect(response.body.windowsManual).toBe(true);
+    expect(response.body.dbPath).toContain("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
   });
 
-  // ── Backwards-compatible: linux/win32 keep original single-path logic ─
+  // ── Linux/win32 use current multi-path probing logic ─
 
-  it("linux uses single hardcoded path and original error message", async () => {
+  it("linux reports all checked config paths when no db paths are accessible", async () => {
     Object.defineProperty(process, "platform", { value: "linux", writable: true });
     vi.mocked(fsPromises.access).mockRejectedValue(new Error("ENOENT"));
     mockDbInstance.__throwOnConstruct = true;
@@ -166,11 +169,10 @@ describe("GET /api/oauth/cursor/auto-import", () => {
     const response = await GET();
 
     expect(response.body.found).toBe(false);
-    expect(response.body.error).toBe(
-      "Cursor database not found. Make sure Cursor IDE is installed and you are logged in."
-    );
-    // fs/promises.access should NOT have been called (linux skips probing)
-    expect(fsPromises.access).not.toHaveBeenCalled();
+    expect(response.body.error).toContain("Cursor database not found. Checked locations:");
+    expect(response.body.error).toContain("/mock/home/.config/Cursor/User/globalStorage/state.vscdb");
+    expect(response.body.error).toContain("/mock/home/.config/cursor/User/globalStorage/state.vscdb");
+    expect(fsPromises.access).toHaveBeenCalled();
   });
 
   it("unsupported platform returns 400", async () => {

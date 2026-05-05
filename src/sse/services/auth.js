@@ -1,12 +1,139 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, getEarliestModelLockUntil, getModelLockKey } from "open-sse/services/accountFallback.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
+
+function isReauthRequiredConnection(connection) {
+  return connection?.provider === "antigravity" && (
+    connection.testStatus === "reauth_required" ||
+    connection.errorCode === "reauth_required" ||
+    connection.providerSpecificData?.antigravity?.reauthRequired === true
+  );
+}
+
+function normalizeErrorMetadata(statusOrMetadata, maybeResetsAtMs) {
+  const metadata = statusOrMetadata && typeof statusOrMetadata === "object" && !Array.isArray(statusOrMetadata)
+    ? statusOrMetadata
+    : { status: statusOrMetadata };
+  const resetsAtMs = metadata.resetsAtMs ?? maybeResetsAtMs ?? null;
+  return {
+    status: metadata.status ?? metadata.statusCode ?? null,
+    reason: metadata.reason ?? null,
+    retryAfterMs: metadata.retryAfterMs ?? null,
+    resetsAtMs,
+  };
+}
+
+function buildAntigravityCooldownData(conn, model, lockUntilIso, metadata, nowIso) {
+  const providerSpecificData = { ...(conn?.providerSpecificData || {}) };
+  const current = providerSpecificData.antigravity || {};
+  const rateLimitResetTimes = { ...(current.rateLimitResetTimes || {}) };
+  const modelKey = model || "__all";
+  rateLimitResetTimes[modelKey] = lockUntilIso;
+
+  providerSpecificData.antigravity = {
+    ...current,
+    cooldownUntil: lockUntilIso,
+    cooldownReason: metadata.reason || current.cooldownReason || "rate_limit_unknown",
+    rateLimitResetTimes,
+    model: model || null,
+    lastProviderStatus: metadata.status ?? current.lastProviderStatus ?? null,
+    retryAfterMs: metadata.retryAfterMs ?? current.retryAfterMs ?? null,
+    lastUsedAt: nowIso,
+  };
+
+  return providerSpecificData;
+}
+
+function buildAntigravitySelectionData(conn, nowIso) {
+  const providerSpecificData = { ...(conn?.providerSpecificData || {}) };
+  providerSpecificData.antigravity = {
+    ...(providerSpecificData.antigravity || {}),
+    lastUsedAt: nowIso,
+  };
+  return providerSpecificData;
+}
+
+function hasAntigravityCooldownMetadata(conn) {
+  const current = conn?.providerSpecificData?.antigravity;
+  if (!current) return false;
+  return Boolean(
+    current.cooldownUntil ||
+    current.cooldownReason ||
+    current.rateLimitResetTimes ||
+    Object.prototype.hasOwnProperty.call(current, "model") ||
+    Object.prototype.hasOwnProperty.call(current, "lastProviderStatus") ||
+    Object.prototype.hasOwnProperty.call(current, "retryAfterMs")
+  );
+}
+
+function pruneAntigravityCooldownData(conn, keysToClear, now) {
+  const providerSpecificData = conn?.providerSpecificData;
+  const current = providerSpecificData?.antigravity;
+  if (!current) return null;
+
+  const keysToClearSet = new Set(keysToClear);
+  const rateLimitResetTimes = { ...(current.rateLimitResetTimes || {}) };
+  for (const key of keysToClear) {
+    if (!key.startsWith("modelLock_")) continue;
+    const modelKey = key === "modelLock___all" ? "__all" : key.slice("modelLock_".length);
+    delete rateLimitResetTimes[modelKey];
+  }
+
+  const activeFlatResetTimes = {};
+  for (const [key, expiry] of Object.entries(conn || {})) {
+    if (!key.startsWith("modelLock_") || keysToClearSet.has(key)) continue;
+    const expiryMs = expiry ? new Date(expiry).getTime() : NaN;
+    if (!Number.isFinite(expiryMs) || expiryMs <= now) continue;
+    const modelKey = key === "modelLock___all" ? "__all" : key.slice("modelLock_".length);
+    activeFlatResetTimes[modelKey] = expiry;
+  }
+
+  for (const modelKey of Object.keys(rateLimitResetTimes)) {
+    if (activeFlatResetTimes[modelKey]) {
+      rateLimitResetTimes[modelKey] = activeFlatResetTimes[modelKey];
+    } else {
+      delete rateLimitResetTimes[modelKey];
+    }
+  }
+
+  for (const [modelKey, expiry] of Object.entries(activeFlatResetTimes)) {
+    rateLimitResetTimes[modelKey] = expiry;
+  }
+
+  const antigravity = { ...current };
+  if (Object.keys(rateLimitResetTimes).length > 0) {
+    antigravity.rateLimitResetTimes = rateLimitResetTimes;
+    const [activeModelKey, activeUntil] = Object.entries(rateLimitResetTimes)
+      .map(([modelKey, expiry]) => [modelKey, new Date(expiry).getTime()])
+      .filter(([, expiry]) => expiry > now)
+      .sort((a, b) => a[1] - b[1])[0] || [];
+    if (activeUntil) {
+      antigravity.cooldownUntil = new Date(activeUntil).toISOString();
+      antigravity.model = activeModelKey === "__all" ? null : activeModelKey;
+    }
+  } else {
+    delete antigravity.rateLimitResetTimes;
+    delete antigravity.cooldownUntil;
+    delete antigravity.cooldownReason;
+    delete antigravity.model;
+    delete antigravity.lastProviderStatus;
+    delete antigravity.retryAfterMs;
+  }
+
+  const nextProviderSpecificData = { ...providerSpecificData };
+  if (Object.keys(antigravity).length > 0) {
+    nextProviderSpecificData.antigravity = antigravity;
+  } else {
+    delete nextProviderSpecificData.antigravity;
+  }
+
+  return nextProviderSpecificData;
+}
 
 /**
  * Get provider credentials from localDb
@@ -63,6 +190,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Filter out model-locked and excluded connections
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
+      if (isReauthRequiredConnection(c)) return false;
       if (isModelLockActive(c, model)) return false;
       return true;
     });
@@ -70,16 +198,22 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
     connections.forEach(c => {
       const excluded = excludeSet.has(c.id);
+      const reauthRequired = isReauthRequiredConnection(c);
       const locked = isModelLockActive(c, model);
-      if (excluded || locked) {
+      if (excluded || reauthRequired || locked) {
         const lockUntil = getEarliestModelLockUntil(c);
-        log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
+        log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${reauthRequired ? "reauth_required" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
       }
     });
 
     if (availableConnections.length === 0) {
+      const selectableConnections = connections.filter(c => !excludeSet.has(c.id) && !isReauthRequiredConnection(c));
+      if (selectableConnections.length === 0 && connections.some(isReauthRequiredConnection)) {
+        log.warn("AUTH", `${provider} | all remaining accounts require reconnect`);
+        return null;
+      }
       // Find earliest lock expiry across all connections for retry timing
-      const lockedConns = connections.filter(c => isModelLockActive(c, model));
+      const lockedConns = selectableConnections.filter(c => isModelLockActive(c, model));
       const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
       const earliest = expiries.sort()[0] || null;
       if (earliest) {
@@ -103,6 +237,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
 
     let connection;
+    let selectionPersisted = false;
     // Pin to preferred connection if specified and available
     if (preferredConnectionId) {
       connection = availableConnections.find((c) => c.id === preferredConnectionId);
@@ -111,7 +246,16 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       }
     }
     if (connection) {
-      // skip strategy
+      const nowIso = new Date().toISOString();
+      const selectionUpdate = {
+        lastUsedAt: nowIso,
+      };
+      if (connection.provider === "antigravity") {
+        selectionUpdate.providerSpecificData = buildAntigravitySelectionData(connection, nowIso);
+      }
+      await updateProviderConnection(connection.id, selectionUpdate);
+      connection = { ...connection, ...selectionUpdate };
+      selectionPersisted = true;
     } else if (strategy === "round-robin") {
       const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
 
@@ -130,10 +274,17 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         // Stay with current account
         connection = current;
         // Update lastUsedAt and increment count (await to ensure persistence)
-        await updateProviderConnection(connection.id, {
-          lastUsedAt: new Date().toISOString(),
+        const nowIso = new Date().toISOString();
+        const selectionUpdate = {
+          lastUsedAt: nowIso,
           consecutiveUseCount: (connection.consecutiveUseCount || 0) + 1
-        });
+        };
+        if (connection.provider === "antigravity") {
+          selectionUpdate.providerSpecificData = buildAntigravitySelectionData(connection, nowIso);
+        }
+        await updateProviderConnection(connection.id, selectionUpdate);
+        connection = { ...connection, ...selectionUpdate };
+        selectionPersisted = true;
       } else {
         // Pick the least recently used (excluding current if possible)
         const sortedByOldest = [...availableConnections].sort((a, b) => {
@@ -146,14 +297,31 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connection = sortedByOldest[0];
 
         // Update lastUsedAt and reset count to 1 (await to ensure persistence)
-        await updateProviderConnection(connection.id, {
-          lastUsedAt: new Date().toISOString(),
+        const nowIso = new Date().toISOString();
+        const selectionUpdate = {
+          lastUsedAt: nowIso,
           consecutiveUseCount: 1
-        });
+        };
+        if (connection.provider === "antigravity") {
+          selectionUpdate.providerSpecificData = buildAntigravitySelectionData(connection, nowIso);
+        }
+        await updateProviderConnection(connection.id, selectionUpdate);
+        connection = { ...connection, ...selectionUpdate };
+        selectionPersisted = true;
       }
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
       connection = availableConnections[0];
+    }
+
+    if (!selectionPersisted) {
+      const nowIso = new Date().toISOString();
+      const selectionUpdate = { lastUsedAt: nowIso };
+      if (connection.provider === "antigravity") {
+        selectionUpdate.providerSpecificData = buildAntigravitySelectionData(connection, nowIso);
+      }
+      await updateProviderConnection(connection.id, selectionUpdate);
+      connection = { ...connection, ...selectionUpdate };
     }
 
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
@@ -189,7 +357,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  * Mark account+model as unavailable — locks modelLock_${model} in DB.
  * All errors (429, 401, 5xx, etc.) lock per model, not per account.
  * @param {string} connectionId
- * @param {number} status - HTTP status code from upstream
+ * @param {number|object} status - HTTP status code or upstream error metadata
  * @param {string} errorText
  * @param {string|null} provider
  * @param {string|null} model - The specific model that triggered the error
@@ -197,39 +365,56 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  */
 export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
+  const metadata = normalizeErrorMetadata(status, resetsAtMs);
+  const providerId = resolveProviderId(provider);
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
   const backoffLevel = conn?.backoffLevel || 0;
+  const now = Date.now();
 
   // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
   let shouldFallback, cooldownMs, newBackoffLevel;
-  if (resetsAtMs && resetsAtMs > Date.now()) {
+  if (metadata.resetsAtMs && metadata.resetsAtMs > now) {
     shouldFallback = true;
-    cooldownMs = Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
+    cooldownMs = metadata.resetsAtMs - now;
     newBackoffLevel = 0;
   } else {
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
+    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(metadata.status, errorText, backoffLevel));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
-  const lockUpdate = buildModelLockUpdate(model, cooldownMs);
-
-  await updateProviderConnection(connectionId, {
+  const lockUntilIso = metadata.resetsAtMs && metadata.resetsAtMs > now
+    ? new Date(metadata.resetsAtMs).toISOString()
+    : new Date(now + cooldownMs).toISOString();
+  const lockUpdate = { [getModelLockKey(model)]: lockUntilIso };
+  const update = {
     ...lockUpdate,
     testStatus: "unavailable",
     lastError: reason,
-    errorCode: status,
-    lastErrorAt: new Date().toISOString(),
+    errorCode: metadata.status,
+    lastErrorAt: new Date(now).toISOString(),
     backoffLevel: newBackoffLevel ?? backoffLevel
-  });
+  };
+
+  if (providerId === "antigravity" && conn) {
+    update.providerSpecificData = buildAntigravityCooldownData(
+      conn,
+      model,
+      lockUntilIso,
+      metadata,
+      new Date(now).toISOString()
+    );
+  }
+
+  await updateProviderConnection(connectionId, update);
 
   const lockKey = Object.keys(lockUpdate)[0];
   const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
-  log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
+  log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${metadata.status}]`);
 
-  if (provider && status && reason) {
-    console.error(`❌ ${provider} [${status}]: ${reason}`);
+  if (provider && metadata.status && reason) {
+    console.error(`❌ ${provider} [${metadata.status}]: ${reason}`);
   }
 
   return { shouldFallback: true, cooldownMs };
@@ -247,10 +432,13 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 export async function clearAccountError(connectionId, currentConnection, model = null) {
   if (!connectionId || connectionId === "noauth") return;
   const conn = currentConnection._connection || currentConnection;
+  if (isReauthRequiredConnection(conn)) return;
+  const providerId = resolveProviderId(conn?.provider || currentConnection?.provider);
   const now = Date.now();
   const allLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));
+  const shouldPruneAntigravity = providerId === "antigravity" && hasAntigravityCooldownMetadata(conn);
 
-  if (!conn.testStatus && !conn.lastError && allLockKeys.length === 0) return;
+  if (!conn.testStatus && !conn.lastError && allLockKeys.length === 0 && !shouldPruneAntigravity) return;
 
   // Keys to clear: current model's lock + all expired locks
   const keysToClear = allLockKeys.filter(k => {
@@ -260,7 +448,7 @@ export async function clearAccountError(connectionId, currentConnection, model =
     return expiry && new Date(expiry).getTime() <= now;   // expired
   });
 
-  if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;
+  if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError && !shouldPruneAntigravity) return;
 
   // Check if any active locks remain after clearing
   const remainingActiveLocks = allLockKeys.filter(k => {
@@ -270,6 +458,10 @@ export async function clearAccountError(connectionId, currentConnection, model =
   });
 
   const clearObj = Object.fromEntries(keysToClear.map(k => [k, null]));
+  if (providerId === "antigravity") {
+    const nextProviderSpecificData = pruneAntigravityCooldownData(conn, keysToClear, now);
+    if (nextProviderSpecificData !== null) clearObj.providerSpecificData = nextProviderSpecificData;
+  }
 
   // Only reset error state if no active locks remain
   if (remainingActiveLocks.length === 0) {

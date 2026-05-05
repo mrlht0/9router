@@ -17,7 +17,12 @@ import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
-import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+import {
+  updateProviderCredentials,
+  checkAndRefreshToken,
+  isPermanentReauthFailure,
+  persistAntigravityReauthRequired,
+} from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 
 /**
@@ -186,6 +191,17 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
 
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
+    if (provider === "antigravity" && (
+      refreshedCredentials.testStatus === "reauth_required" ||
+      refreshedCredentials.errorCode === "reauth_required" ||
+      refreshedCredentials.providerSpecificData?.antigravity?.reauthRequired === true
+    )) {
+      log.warn("AUTH", `Account ${credentials.connectionName} requires Antigravity reconnect, trying fallback`);
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = "Reconnect Antigravity to re-authorize this account.";
+      lastStatus = HTTP_STATUS.UNAUTHORIZED;
+      continue;
+    }
 
     // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
     if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
@@ -224,6 +240,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
           testStatus: "active"
         });
       },
+      onCredentialsRefreshFailed: async (failure) => {
+        if (provider === "antigravity" && isPermanentReauthFailure(failure)) {
+          await persistAntigravityReauthRequired(
+            credentials.connectionId,
+            failure,
+            credentials._connection?.providerSpecificData || credentials.providerSpecificData
+          );
+        }
+      },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
       }
@@ -231,8 +256,22 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     if (result.success) return result.response;
 
+    if (provider === "antigravity" && isPermanentReauthFailure(result.refreshFailure)) {
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = "Reconnect Antigravity to re-authorize this account.";
+      lastStatus = HTTP_STATUS.UNAUTHORIZED;
+      continue;
+    }
+
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+    const { shouldFallback } = await markAccountUnavailable(
+      credentials.connectionId,
+      result,
+      result.error,
+      provider,
+      model,
+      result.resetsAtMs
+    );
 
     if (shouldFallback) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);

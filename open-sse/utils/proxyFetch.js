@@ -107,6 +107,60 @@ function normalizeProxyUrl(proxyUrl) {
   }
 }
 
+function getHeaderValue(headers, name) {
+  if (!headers) return null;
+  if (typeof headers.get === "function") return headers.get(name);
+
+  const lowerName = name.toLowerCase();
+  if (Array.isArray(headers)) {
+    const pair = headers.find(([key]) => String(key).toLowerCase() === lowerName);
+    return pair ? pair[1] : null;
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lowerName) return value;
+  }
+  return null;
+}
+
+function headersToObject(headers) {
+  if (!headers) return {};
+  if (typeof headers.entries === "function") return Object.fromEntries(headers.entries());
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  return { ...headers };
+}
+
+function isAnthropicApiUrl(targetUrl) {
+  try {
+    return new URL(targetUrl).hostname === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
+function isEventStreamRequest(options) {
+  const accept = getHeaderValue(options?.headers, "accept");
+  return typeof accept === "string" && accept.toLowerCase().includes("text/event-stream");
+}
+
+async function fetchAnthropicWithGotScraping(targetUrl, options) {
+  const { gotScraping } = await import("got-scraping");
+  const gotResponse = await gotScraping(targetUrl, {
+    method: options.method || "GET",
+    headers: headersToObject(options.headers),
+    body: options.body,
+    responseType: "buffer",
+    throwHttpErrors: false,
+  });
+
+  const responseBody = gotResponse.rawBody ?? gotResponse.body ?? null;
+  return new Response(responseBody, {
+    status: gotResponse.statusCode || 200,
+    statusText: gotResponse.statusMessage || "",
+    headers: gotResponse.headers || {},
+  });
+}
+
 function resolveConnectionProxyUrl(targetUrl, proxyOptions) {
   const enabled = proxyOptions?.enabled === true || proxyOptions?.connectionProxyEnabled === true;
   if (!enabled) return null;
@@ -206,6 +260,16 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       "x-relay-path": `${parsed.pathname}${parsed.search}`,
     };
     return originalFetch(vercelRelayUrl, { ...options, headers: relayHeaders });
+  }
+
+  // Official Anthropic endpoints are sensitive to TLS/header fingerprints.
+  // Keep the non-streaming path on got-scraping, but fall back to fetch on any issue.
+  if (isAnthropicApiUrl(targetUrl) && !isEventStreamRequest(options)) {
+    try {
+      return await fetchAnthropicWithGotScraping(targetUrl, options);
+    } catch {
+      // Graceful fallback preserves existing proxy/direct fetch behavior.
+    }
   }
 
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);

@@ -13,14 +13,79 @@ function getRefreshCacheKey(provider, refreshToken) {
 
 // Check if refresh result indicates unrecoverable error (caller should stop retry, force re-auth)
 export function isUnrecoverableRefreshError(result) {
+  const error = typeof result?.error === "string" ? result.error : null;
+  const code = typeof result?.code === "string" ? result.code : null;
+
   return (
     result &&
     typeof result === "object" &&
-    (result.error === "unrecoverable_refresh_error" ||
-      result.error === "refresh_token_reused" ||
-      result.error === "invalid_request" ||
-      result.error === "invalid_grant")
+    (result.permanent === true ||
+      error === "unrecoverable_refresh_error" ||
+      error === "refresh_token_reused" ||
+      error === "invalid_request" ||
+      error === "invalid_grant" ||
+      code === "refresh_token_reused" ||
+      code === "invalid_grant")
   );
+}
+
+function parseGoogleOAuthErrorBody(errorText) {
+  const raw = typeof errorText === "string" ? errorText : "";
+  const trimmed = raw.trim();
+  let body = null;
+
+  if (trimmed) {
+    try {
+      body = JSON.parse(trimmed);
+    } catch {
+      try {
+        body = Object.fromEntries(new URLSearchParams(trimmed));
+      } catch {}
+    }
+  }
+
+  const errorValue = body?.error;
+  const textCode = trimmed.match(/\b(invalid_grant|invalid_request|invalid_client|unauthorized_client|server_error|temporarily_unavailable)\b/i)?.[1]?.toLowerCase();
+  const code = (
+    (typeof errorValue === "string" && errorValue) ||
+    (typeof errorValue?.code === "string" && errorValue.code) ||
+    (typeof body?.error_code === "string" && body.error_code) ||
+    (typeof body?.code === "string" && body.code) ||
+    textCode ||
+    null
+  );
+  const message = (
+    (typeof body?.error_description === "string" && body.error_description) ||
+    (typeof errorValue?.message === "string" && errorValue.message) ||
+    (typeof body?.error_message === "string" && body.error_message) ||
+    (typeof body?.message === "string" && body.message) ||
+    trimmed ||
+    null
+  );
+
+  return { code, message, raw };
+}
+
+function buildGoogleRefreshFailure(provider, response, errorText) {
+  const parsed = parseGoogleOAuthErrorBody(errorText);
+  const code = (parsed.code || `http_${response.status}`).toLowerCase();
+  // #887: Google invalid_grant means retries cannot recover; user must re-auth.
+  const permanent = code === "invalid_grant";
+  const message = permanent
+    ? `Google OAuth refresh failed permanently (${code}): ${parsed.message || `HTTP ${response.status}`}. Re-authentication required.`
+    : `Google OAuth refresh failed (${code}): ${parsed.message || `HTTP ${response.status}`}`;
+
+  return {
+    ok: false,
+    permanent,
+    reason: permanent ? "reauth_required" : code,
+    code,
+    message,
+    provider,
+    status: response.status,
+    statusText: response.statusText,
+    raw: parsed.raw,
+  };
 }
 
 // Get provider-specific refresh lead time, falls back to default buffer
@@ -125,7 +190,19 @@ export async function refreshClaudeOAuthToken(refreshToken, log) {
 /**
  * Specialized refresh for Google providers (Gemini, Antigravity)
  */
-export async function refreshGoogleToken(refreshToken, clientId, clientSecret, log) {
+export async function refreshGoogleToken(refreshToken, clientIdOrProvider, clientSecretOrLog, log, provider = "google") {
+  let clientId = clientIdOrProvider;
+  let clientSecret = clientSecretOrLog;
+  let logger = log;
+  let providerName = provider;
+
+  if (PROVIDERS[clientIdOrProvider]) {
+    providerName = clientIdOrProvider;
+    clientId = PROVIDERS[providerName].clientId;
+    clientSecret = PROVIDERS[providerName].clientSecret;
+    logger = clientSecretOrLog;
+  }
+
   try {
     const response = await fetch(OAUTH_ENDPOINTS.google.token, {
       method: "POST",
@@ -143,15 +220,21 @@ export async function refreshGoogleToken(refreshToken, clientId, clientSecret, l
 
     if (!response.ok) {
       const errorText = await response.text();
-      log?.error?.("TOKEN_REFRESH", "Failed to refresh Google token", { status: response.status, error: errorText });
-      return null;
+      const failure = buildGoogleRefreshFailure(providerName, response, errorText);
+      logger?.error?.("TOKEN_REFRESH", failure.message, {
+        status: failure.status,
+        code: failure.code,
+        permanent: failure.permanent,
+        error: failure.raw,
+      });
+      return failure;
     }
 
     const tokens = await response.json();
-    log?.info?.("TOKEN_REFRESH", "Successfully refreshed Google token", { hasNewAccessToken: !!tokens.access_token, expiresIn: tokens.expires_in });
+    logger?.info?.("TOKEN_REFRESH", "Successfully refreshed Google token", { hasNewAccessToken: !!tokens.access_token, expiresIn: tokens.expires_in });
     return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token || refreshToken, expiresIn: tokens.expires_in };
   } catch (error) {
-    log?.error?.("TOKEN_REFRESH", `Network error refreshing Google token: ${error.message}`);
+    logger?.error?.("TOKEN_REFRESH", `Network error refreshing Google token: ${error.message}`);
     return null;
   }
 }
@@ -540,8 +623,7 @@ async function _getAccessTokenInternal(provider, credentials, log) {
     case "antigravity":
       return await refreshGoogleToken(
         credentials.refreshToken,
-        PROVIDERS[provider].clientId,
-        PROVIDERS[provider].clientSecret,
+        provider,
         log
       );
 
@@ -591,8 +673,7 @@ export async function refreshTokenByProvider(provider, credentials, log) {
     case "antigravity":
       return refreshGoogleToken(
         credentials.refreshToken,
-        PROVIDERS[provider].clientId,
-        PROVIDERS[provider].clientSecret,
+        provider,
         log
       );
     case "claude":
@@ -686,7 +767,7 @@ export async function getAllAccessTokens(userInfo, log) {
           refreshToken: connection.refreshToken
         }, log);
 
-        if (token) {
+        if (token && token.ok !== false) {
           results[connection.provider] = token;
         }
       }
@@ -780,6 +861,8 @@ export async function refreshVertexToken(saJson, log) {
  * @returns {Promise<object|null>} Token result or null if all retries fail
  */
 export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null) {
+  let lastStructuredFailure = null;
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     if (attempt > 0) {
       const delay = attempt * 1000;
@@ -789,13 +872,19 @@ export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null) {
 
     try {
       const result = await refreshFn();
+      if (isUnrecoverableRefreshError(result)) return result;
+      if (result?.ok === false) {
+        lastStructuredFailure = result;
+        log?.warn?.("TOKEN_REFRESH", `Attempt ${attempt + 1}/${maxRetries} failed: ${result.message || result.code || "refresh failed"}`);
+        continue;
+      }
       if (result) return result;
     } catch (error) {
+      if (isUnrecoverableRefreshError(error)) return error;
       log?.warn?.("TOKEN_REFRESH", `Attempt ${attempt + 1}/${maxRetries} failed: ${error.message}`);
     }
   }
 
   log?.error?.("TOKEN_REFRESH", `All ${maxRetries} retry attempts failed`);
-  return null;
+  return lastStructuredFailure || null;
 }
-

@@ -35,6 +35,15 @@ function sanitizeGeminiFunctionName(name) {
   return sanitized.substring(0, 64);
 }
 
+function getAntigravitySignature(source, fallback) {
+  const metadata = source?.providerMetadata || source?.provider_metadata;
+  return metadata?.antigravity?.thoughtSignature
+    || metadata?.antigravity?.signature
+    || source?.thoughtSignature
+    || source?.signature
+    || fallback;
+}
+
 // Core: Convert OpenAI request to Gemini format (base for all variants)
 function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE) {
   const result = {
@@ -101,15 +110,17 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
         }
       } else if (role === "assistant") {
         const parts = [];
+        const messageSignature = getAntigravitySignature(msg, signature);
 
         // Thinking/reasoning → thought part with signature
         if (msg.reasoning_content) {
           parts.push({
             thought: true,
-            text: msg.reasoning_content
+            text: msg.reasoning_content,
+            thoughtSignature: messageSignature
           });
           parts.push({
-            thoughtSignature: signature,
+            thoughtSignature: messageSignature,
             text: ""
           });
         }
@@ -127,8 +138,9 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
             if (tc.type !== "function") continue;
 
             const args = tryParseJSON(tc.function?.arguments || "{}");
+            const toolSignature = getAntigravitySignature(tc, messageSignature);
             parts.push({
-              thoughtSignature: signature,
+              thoughtSignature: toolSignature,
               functionCall: {
                 id: tc.id,
                 name: sanitizeGeminiFunctionName(tc.function.name),
@@ -467,4 +479,3 @@ export function openaiToAntigravityRequest(model, body, stream, credentials = nu
 register(FORMATS.OPENAI, FORMATS.GEMINI, openaiToGeminiRequest, null);
 register(FORMATS.OPENAI, FORMATS.GEMINI_CLI, (model, body, stream, credentials) => wrapInCloudCodeEnvelope(model, openaiToGeminiCLIRequest(model, body, stream), credentials), null);
 register(FORMATS.OPENAI, FORMATS.ANTIGRAVITY, openaiToAntigravityRequest, null);
-

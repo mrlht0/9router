@@ -158,7 +158,18 @@ describe("handleImageGenerationCore", () => {
   it("generates image with NanoBanana format", async () => {
     global.fetch.mockResolvedValueOnce(
       new Response(
-        JSON.stringify({ image: "base64nanobanana" }),
+        JSON.stringify({ code: 200, data: { taskId: "nano-task-1" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    global.fetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: {
+            successFlag: 1,
+            response: { resultImageUrl: "https://example.com/nanobanana.png" },
+          },
+        }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       )
     );
@@ -178,7 +189,7 @@ describe("handleImageGenerationCore", () => {
     expect(requestBody.image_size).toBe("9:16");
 
     const responseBody = await result.response.json();
-    expect(responseBody.data[0].b64_json).toBe("base64nanobanana");
+    expect(responseBody.data[0].url).toBe("https://example.com/nanobanana.png");
   });
 
   it("generates image with SD WebUI format", async () => {

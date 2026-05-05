@@ -21,7 +21,8 @@ import {
   formatProviderCredentials as _formatProviderCredentials,
   getAllAccessTokens as _getAllAccessTokens,
   refreshKiroToken as _refreshKiroToken,
-  getRefreshLeadMs as _getRefreshLeadMs
+  getRefreshLeadMs as _getRefreshLeadMs,
+  isUnrecoverableRefreshError as _isUnrecoverableRefreshError
 } from "open-sse/services/tokenRefresh.js";
 
 export const TOKEN_EXPIRY_BUFFER_MS = BUFFER_MS;
@@ -102,6 +103,45 @@ function needsProjectId(provider) {
   return provider === "antigravity" || provider === "gemini-cli";
 }
 
+export function isPermanentReauthFailure(result) {
+  return _isUnrecoverableRefreshError(result) || result?.reason === "reauth_required";
+}
+
+export function buildAntigravityReauthUpdate(failure = {}, existingProviderSpecificData = {}) {
+  const now = new Date().toISOString();
+  const reason = failure.code || failure.reason || "reauth_required";
+  const message = "Reconnect Antigravity to re-authorize this account.";
+
+  return {
+    testStatus: "reauth_required",
+    errorCode: "reauth_required",
+    lastError: message,
+    lastErrorAt: now,
+    providerSpecificData: {
+      ...existingProviderSpecificData,
+      antigravity: {
+        ...(existingProviderSpecificData.antigravity || {}),
+        reauthRequired: true,
+        reauthReason: reason,
+        reauthRequiredAt: now,
+      },
+    },
+  };
+}
+
+export async function persistAntigravityReauthRequired(connectionId, failure = {}, existingProviderSpecificData = {}) {
+  if (!connectionId) return false;
+
+  const result = await updateProviderCredentials(connectionId, buildAntigravityReauthUpdate(failure, existingProviderSpecificData));
+  if (result) {
+    log.warn("TOKEN_REFRESH", "Marked Antigravity connection as reauth_required", {
+      connectionId,
+      reason: failure.code || failure.reason || "reauth_required",
+    });
+  }
+  return result;
+}
+
 /**
  * Non-blocking: fetch the project ID for a connection after a token refresh and
  * persist it to localDb.  Invalidates the stale cached value first so the fetch
@@ -162,6 +202,10 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
       };
     }
     if (newCredentials.projectId)            updates.projectId = newCredentials.projectId;
+    if (newCredentials.testStatus !== undefined) updates.testStatus = newCredentials.testStatus;
+    if (newCredentials.errorCode !== undefined) updates.errorCode = newCredentials.errorCode;
+    if (newCredentials.lastError !== undefined) updates.lastError = newCredentials.lastError;
+    if (newCredentials.lastErrorAt !== undefined) updates.lastErrorAt = newCredentials.lastErrorAt;
 
     const result = await updateProviderConnection(connectionId, updates);
     log.info("TOKEN_REFRESH", "Credentials updated in localDb", {
@@ -229,6 +273,17 @@ export async function checkAndRefreshToken(provider, credentials) {
 
         // Non-blocking: refresh projectId with the new access token
         _refreshProjectId(provider, creds.connectionId, creds.accessToken);
+      } else if (provider === "antigravity" && isPermanentReauthFailure(newCreds)) {
+        const reauthUpdate = buildAntigravityReauthUpdate(
+          newCreds,
+          creds._connection?.providerSpecificData || creds.providerSpecificData
+        );
+        await updateProviderCredentials(creds.connectionId, reauthUpdate);
+        creds = { ...creds, ...reauthUpdate };
+        log.warn("TOKEN_REFRESH", "Marked Antigravity connection as reauth_required", {
+          connectionId: creds.connectionId,
+          reason: newCreds.code || newCreds.reason || "reauth_required",
+        });
       }
     }
   }
