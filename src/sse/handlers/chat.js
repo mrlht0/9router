@@ -221,6 +221,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
           accessToken: newCreds.accessToken,
           refreshToken: newCreds.refreshToken,
           providerSpecificData: newCreds.providerSpecificData,
+          existingProviderSpecificData: credentials._connection?.providerSpecificData,
           testStatus: "active"
         });
       },

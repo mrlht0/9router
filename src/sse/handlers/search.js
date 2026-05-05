@@ -181,6 +181,7 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
           accessToken: newCreds.accessToken,
           refreshToken: newCreds.refreshToken,
           providerSpecificData: newCreds.providerSpecificData,
+          existingProviderSpecificData: credentials._connection?.providerSpecificData,
           testStatus: "active"
         });
       },

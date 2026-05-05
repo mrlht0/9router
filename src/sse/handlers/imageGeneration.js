@@ -118,6 +118,7 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
           accessToken: newCreds.accessToken,
           refreshToken: newCreds.refreshToken,
           providerSpecificData: newCreds.providerSpecificData,
+          existingProviderSpecificData: credentials._connection?.providerSpecificData,
           testStatus: "active"
         });
       },
