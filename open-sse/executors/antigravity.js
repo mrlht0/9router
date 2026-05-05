@@ -17,6 +17,237 @@ function sanitizeFunctionName(name) {
 
 const MAX_RETRY_AFTER_MS = 10000;
 const MAX_ANTIGRAVITY_OUTPUT_TOKENS = 16384;
+const ANTIGRAVITY_PARSED_ERROR_STATUSES = new Set([
+  HTTP_STATUS.RATE_LIMITED,
+  HTTP_STATUS.SERVICE_UNAVAILABLE,
+  529
+]);
+const DURATION_TOKEN_PATTERN = /(\d+(?:\.\d+)?)\s*(milliseconds?|msecs?|ms|hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)(?=\d|$|[^a-zA-Z])/gi;
+const DURATION_FRAGMENT = "((?:\\d+(?:\\.\\d+)?\\s*(?:milliseconds?|msecs?|ms|hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)\\s*){1,4})";
+
+function parseDurationMs(value, { plainSeconds = false } = {}) {
+  const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  if (!text) return null;
+
+  if (plainSeconds && /^\d+(?:\.\d+)?$/.test(text)) {
+    const seconds = Number(text);
+    return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : null;
+  }
+
+  let totalMs = 0;
+  let matched = false;
+  const re = new RegExp(DURATION_TOKEN_PATTERN.source, "gi");
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    matched = true;
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    const unit = match[2].toLowerCase();
+    if (unit.startsWith("ms") || unit.startsWith("millisecond") || unit.startsWith("msec")) totalMs += amount;
+    else if (unit.startsWith("h")) totalMs += amount * 60 * 60 * 1000;
+    else if (unit.startsWith("m")) totalMs += amount * 60 * 1000;
+    else if (unit.startsWith("s")) totalMs += amount * 1000;
+  }
+
+  return matched && totalMs > 0 ? Math.round(totalMs) : null;
+}
+
+function futureDateMs(value, now = Date.now()) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp > now ? timestamp : null;
+}
+
+function parseRetryAfterValue(value, now = Date.now()) {
+  const durationMs = parseDurationMs(value, { plainSeconds: true });
+  if (durationMs) return { retryAfterMs: durationMs, resetsAtMs: now + durationMs };
+
+  const resetsAtMs = futureDateMs(value, now);
+  return resetsAtMs ? { retryAfterMs: resetsAtMs - now, resetsAtMs } : {};
+}
+
+function parseResetAtValue(value, now = Date.now()) {
+  const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  if (!text) return {};
+
+  const numeric = Number(text);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const resetsAtMs = numeric > 1e12 ? numeric : numeric > 1e9 ? numeric * 1000 : null;
+    if (resetsAtMs && resetsAtMs > now) return { retryAfterMs: resetsAtMs - now, resetsAtMs };
+  }
+
+  const resetsAtMs = futureDateMs(text, now);
+  return resetsAtMs ? { retryAfterMs: resetsAtMs - now, resetsAtMs } : {};
+}
+
+function extractAntigravityErrorMessage(bodyText) {
+  const raw = typeof bodyText === "string" ? bodyText.trim() : "";
+  if (!raw) return "";
+
+  try {
+    const json = JSON.parse(raw);
+    const error = json?.error;
+    const candidates = [
+      typeof error?.message === "string" ? error.message : null,
+      typeof json?.message === "string" ? json.message : null,
+      typeof error === "string" ? error : null,
+      typeof json?.error_description === "string" ? json.error_description : null,
+      typeof error?.status === "string" ? error.status : null,
+      typeof error?.code === "string" ? error.code : null,
+    ];
+    const message = candidates.find(v => v && v.trim());
+    if (message) return message;
+    return JSON.stringify(json);
+  } catch {
+    return raw;
+  }
+}
+
+function parseRetryMsFromMessage(message) {
+  const text = typeof message === "string" ? message.trim() : "";
+  if (!text) return null;
+
+  const patterns = [
+    new RegExp(`\\b(?:reset|resets|resetting)\\s+(?:after|in)\\s+${DURATION_FRAGMENT}`, "i"),
+    new RegExp(`\\b(?:retry|try again|available|resume)\\s+(?:after|in)\\s+${DURATION_FRAGMENT}`, "i"),
+    new RegExp(`\\b(?:quota|rate limit|usage limit)[^.!?]{0,120}?\\b(?:after|in)\\s+${DURATION_FRAGMENT}`, "i"),
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match) {
+      const durationText = match[match.length - 1];
+      const parsed = parseDurationMs(durationText);
+      if (parsed) return parsed;
+    }
+  }
+
+  if (new RegExp(`^${DURATION_FRAGMENT}$`, "i").test(text)) {
+    return parseDurationMs(text);
+  }
+
+  return null;
+}
+
+function parseAntigravityRetryTiming(headers, bodyText = "", now = Date.now()) {
+  const timing = { retryAfterMs: null, resetsAtMs: null };
+  const getHeader = (name) => headers?.get?.(name) || null;
+
+  const retryAfter = getHeader("retry-after");
+  if (retryAfter) {
+    const parsed = parseRetryAfterValue(retryAfter, now);
+    timing.retryAfterMs = parsed.retryAfterMs ?? timing.retryAfterMs;
+    timing.resetsAtMs = parsed.resetsAtMs ?? timing.resetsAtMs;
+  }
+
+  const resetAfter = getHeader("x-ratelimit-reset-after");
+  if (resetAfter) {
+    const resetAfterMs = parseDurationMs(resetAfter, { plainSeconds: true });
+    if (resetAfterMs) {
+      timing.retryAfterMs ??= resetAfterMs;
+      timing.resetsAtMs ??= now + resetAfterMs;
+    }
+  }
+
+  const reset = getHeader("x-ratelimit-reset");
+  if (reset) {
+    const parsed = parseResetAtValue(reset, now);
+    timing.resetsAtMs = parsed.resetsAtMs ?? timing.resetsAtMs;
+    timing.retryAfterMs ??= parsed.retryAfterMs ?? null;
+  }
+
+  const messageRetryMs = parseRetryMsFromMessage(extractAntigravityErrorMessage(bodyText));
+  if (messageRetryMs) {
+    timing.retryAfterMs ??= messageRetryMs;
+    const messageResetsAtMs = now + messageRetryMs;
+    if (!timing.resetsAtMs || messageResetsAtMs > timing.resetsAtMs) {
+      timing.resetsAtMs = messageResetsAtMs;
+    }
+  }
+
+  if (timing.resetsAtMs && timing.resetsAtMs <= now) timing.resetsAtMs = null;
+  if (timing.retryAfterMs && timing.retryAfterMs <= 0) timing.retryAfterMs = null;
+  if (!timing.retryAfterMs && timing.resetsAtMs) timing.retryAfterMs = timing.resetsAtMs - now;
+  if (!timing.resetsAtMs && timing.retryAfterMs) timing.resetsAtMs = now + timing.retryAfterMs;
+
+  return timing;
+}
+
+function classifyAntigravityError(status, message, retryAfterMs, resetsAtMs, now = Date.now()) {
+  const text = typeof message === "string" ? message.toLowerCase() : "";
+  const waitMs = resetsAtMs && resetsAtMs > now ? resetsAtMs - now : retryAfterMs;
+
+  if (status === HTTP_STATUS.SERVICE_UNAVAILABLE || status === 529) {
+    return "model_capacity";
+  }
+
+  if (status === HTTP_STATUS.RATE_LIMITED) {
+    const strongQuota = /\b(quota|usage\s+limit|resource[_\s-]*exhausted|limit\s+reached|exhausted)\b/i.test(text);
+    if (waitMs && waitMs > MAX_RETRY_AFTER_MS) return "quota_exhausted";
+    if (waitMs && waitMs > 0) return "rate_limit";
+    return strongQuota ? "quota_exhausted" : "rate_limit_unknown";
+  }
+
+  return "upstream_error";
+}
+
+function parseGoogleOAuthErrorBody(errorText) {
+  const raw = typeof errorText === "string" ? errorText : "";
+  const trimmed = raw.trim();
+  let body = null;
+
+  if (trimmed) {
+    try {
+      body = JSON.parse(trimmed);
+    } catch {
+      try {
+        body = Object.fromEntries(new URLSearchParams(trimmed));
+      } catch {}
+    }
+  }
+
+  const errorValue = body?.error;
+  const textCode = trimmed.match(/\b(invalid_grant|invalid_request|invalid_client|unauthorized_client|server_error|temporarily_unavailable)\b/i)?.[1]?.toLowerCase();
+  const code = (
+    (typeof errorValue === "string" && errorValue) ||
+    (typeof errorValue?.code === "string" && errorValue.code) ||
+    (typeof body?.error_code === "string" && body.error_code) ||
+    (typeof body?.code === "string" && body.code) ||
+    textCode ||
+    null
+  );
+  const message = (
+    (typeof body?.error_description === "string" && body.error_description) ||
+    (typeof errorValue?.message === "string" && errorValue.message) ||
+    (typeof body?.error_message === "string" && body.error_message) ||
+    (typeof body?.message === "string" && body.message) ||
+    trimmed ||
+    null
+  );
+
+  return { code, message, raw };
+}
+
+function buildAntigravityRefreshFailure(response, errorText) {
+  const parsed = parseGoogleOAuthErrorBody(errorText);
+  const code = (parsed.code || `http_${response.status}`).toLowerCase();
+  // #887: Google invalid_grant means reconnecting Antigravity is required; retries cannot recover.
+  const permanent = code === "invalid_grant";
+  const detail = parsed.message || `HTTP ${response.status}`;
+
+  return {
+    ok: false,
+    permanent,
+    reason: permanent ? "reauth_required" : code,
+    code,
+    message: permanent
+      ? `Google OAuth refresh failed permanently (${code}): ${detail}. Reconnect Antigravity to re-authorize this account.`
+      : `Google OAuth refresh failed (${code}): ${detail}`,
+    provider: "antigravity",
+    status: response.status,
+    statusText: response.statusText,
+    raw: parsed.raw,
+  };
+}
 
 export class AntigravityExecutor extends BaseExecutor {
   constructor() {
@@ -122,7 +353,17 @@ export class AntigravityExecutor extends BaseExecutor {
         })
       }, proxyOptions);
 
-      if (!response.ok) return null;
+      if (!response.ok) {
+        const errorText = await response.text();
+        const failure = buildAntigravityRefreshFailure(response, errorText);
+        log?.error?.("TOKEN", failure.message, {
+          status: failure.status,
+          code: failure.code,
+          permanent: failure.permanent,
+          error: failure.raw,
+        });
+        return failure;
+      }
 
       const tokens = await response.json();
       log?.info?.("TOKEN", "Antigravity refreshed");
@@ -154,27 +395,20 @@ export class AntigravityExecutor extends BaseExecutor {
 
     const retryAfter = headers.get('retry-after');
     if (retryAfter) {
-      const seconds = parseInt(retryAfter, 10);
-      if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
-
-      const date = new Date(retryAfter);
-      if (!isNaN(date.getTime())) {
-        const diff = date.getTime() - Date.now();
-        return diff > 0 ? diff : null;
-      }
+      const { retryAfterMs } = parseRetryAfterValue(retryAfter);
+      if (retryAfterMs) return retryAfterMs;
     }
 
     const resetAfter = headers.get('x-ratelimit-reset-after');
     if (resetAfter) {
-      const seconds = parseInt(resetAfter, 10);
-      if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
+      const retryAfterMs = parseDurationMs(resetAfter, { plainSeconds: true });
+      if (retryAfterMs) return retryAfterMs;
     }
 
     const resetTimestamp = headers.get('x-ratelimit-reset');
     if (resetTimestamp) {
-      const ts = parseInt(resetTimestamp, 10) * 1000;
-      const diff = ts - Date.now();
-      return diff > 0 ? diff : null;
+      const { retryAfterMs } = parseResetAtValue(resetTimestamp);
+      if (retryAfterMs) return retryAfterMs;
     }
 
     return null;
@@ -185,15 +419,27 @@ export class AntigravityExecutor extends BaseExecutor {
   parseRetryFromErrorMessage(errorMessage) {
     if (!errorMessage || typeof errorMessage !== "string") return null;
 
-    const match = errorMessage.match(/reset after (\d+h)?(\d+m)?(\d+s)?/i);
-    if (!match) return null;
+    return parseRetryMsFromMessage(errorMessage);
+  }
 
-    let totalMs = 0;
-    if (match[1]) totalMs += parseInt(match[1]) * 3600 * 1000; // hours
-    if (match[2]) totalMs += parseInt(match[2]) * 60 * 1000; // minutes
-    if (match[3]) totalMs += parseInt(match[3]) * 1000; // seconds
+  parseError(response, bodyText) {
+    if (!ANTIGRAVITY_PARSED_ERROR_STATUSES.has(response.status)) {
+      return super.parseError(response, bodyText);
+    }
 
-    return totalMs > 0 ? totalMs : null;
+    const now = Date.now();
+    const message = extractAntigravityErrorMessage(bodyText) || `HTTP ${response.status}`;
+    const { retryAfterMs, resetsAtMs } = parseAntigravityRetryTiming(response.headers, bodyText, now);
+    const reason = classifyAntigravityError(response.status, message, retryAfterMs, resetsAtMs, now);
+
+    return {
+      status: response.status,
+      message,
+      reason,
+      retryAfterMs,
+      resetsAtMs,
+      retryable: reason === "model_capacity" || reason === "rate_limit" || reason === "rate_limit_unknown"
+    };
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
@@ -235,9 +481,7 @@ export class AntigravityExecutor extends BaseExecutor {
           if (!retryMs) {
             try {
               const errorBody = await response.clone().text();
-              const errorJson = JSON.parse(errorBody);
-              const errorMessage = errorJson?.error?.message || errorJson?.message || "";
-              retryMs = this.parseRetryFromErrorMessage(errorMessage);
+              retryMs = this.parseRetryFromErrorMessage(extractAntigravityErrorMessage(errorBody));
             } catch (e) {
               // Ignore parse errors, will fall back to exponential backoff
             }

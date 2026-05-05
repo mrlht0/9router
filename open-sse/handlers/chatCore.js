@@ -26,7 +26,7 @@ import { compressMessages, formatRtkLog } from "../rtk/index.js";
  * @param {object} options.credentials - Provider credentials
  * @param {string} options.sourceFormatOverride - Override detected source format (e.g. "openai-responses")
  */
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, cavemanEnabled, cavemanLevel, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onCredentialsRefreshFailed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, cavemanEnabled, cavemanLevel, sourceFormatOverride, providerThinking }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
 
@@ -205,6 +205,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         } catch { log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`); }
       } else {
         log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh failed`);
+        if (newCredentials && onCredentialsRefreshFailed) {
+          try { await onCredentialsRefreshFailed(newCredentials); } catch (e) { log?.warn?.("TOKEN", `onCredentialsRefreshFailed failed: ${e.message}`); }
+        }
+        if (newCredentials?.permanent === true || newCredentials?.reason === "reauth_required") {
+          return {
+            ...createErrorResult(providerResponse.status, newCredentials.message || `${provider.toUpperCase()} refresh failed`),
+            refreshFailure: newCredentials,
+          };
+        }
       }
     } catch (e) {
       log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh threw: ${e.message}`);

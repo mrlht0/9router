@@ -119,6 +119,24 @@ function normalizeSchemaTypes(schema) {
   return result;
 }
 
+function getThoughtSignature(part) {
+  return part?.thoughtSignature || part?.thought_signature || part?.signature || null;
+}
+
+function attachAntigravityMetadata(message, signature) {
+  if (!signature) return;
+  const providerMetadata = message.providerMetadata || {};
+  const antigravity = providerMetadata.antigravity || {};
+  message.providerMetadata = {
+    ...providerMetadata,
+    antigravity: {
+      ...antigravity,
+      thoughtSignature: antigravity.thoughtSignature || signature,
+      signature: antigravity.signature || signature
+    }
+  };
+}
+
 // Convert Antigravity content to OpenAI message
 // Handles: text, thought, thoughtSignature, functionCall, functionResponse, inlineData
 function convertContent(content) {
@@ -132,8 +150,12 @@ function convertContent(content) {
   const toolCalls = [];
   const toolResults = [];
   let reasoningContent = "";
+  let thoughtSignature = null;
 
   for (const part of content.parts) {
+    const signature = getThoughtSignature(part);
+    if (signature && !thoughtSignature) thoughtSignature = signature;
+
     // Thinking content (thought: true)
     if (part.thought === true && part.text) {
       reasoningContent += part.text;
@@ -141,7 +163,8 @@ function convertContent(content) {
     }
 
     // Text with thoughtSignature = regular text after thinking
-    if (part.thoughtSignature && part.text !== undefined) {
+    if (signature && part.text !== undefined) {
+      if (part.text === "") continue;
       textParts.push({ type: "text", text: part.text });
       continue;
     }
@@ -163,14 +186,16 @@ function convertContent(content) {
 
     // Function call
     if (part.functionCall) {
-      toolCalls.push({
+      const toolCall = {
         id: part.functionCall.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         type: "function",
         function: {
           name: part.functionCall.name,
           arguments: JSON.stringify(part.functionCall.args || {})
         }
-      });
+      };
+      attachAntigravityMetadata(toolCall, signature);
+      toolCalls.push(toolCall);
     }
 
     // Function response → collect all, each becomes a separate tool message
@@ -197,6 +222,7 @@ function convertContent(content) {
     if (reasoningContent) {
       msg.reasoning_content = reasoningContent;
     }
+    attachAntigravityMetadata(msg, thoughtSignature);
     msg.tool_calls = toolCalls;
     return msg;
   }
@@ -210,6 +236,7 @@ function convertContent(content) {
     if (reasoningContent) {
       msg.reasoning_content = reasoningContent;
     }
+    attachAntigravityMetadata(msg, thoughtSignature);
     return msg;
   }
 

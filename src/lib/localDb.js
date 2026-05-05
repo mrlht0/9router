@@ -357,6 +357,37 @@ export async function getProviderConnectionById(id) {
   return db.data.providerConnections.find(c => c.id === id) || null;
 }
 
+function clearAntigravityReauthIfActive(previous, next, updates) {
+  if (next?.provider !== "antigravity" || updates?.testStatus !== "active") return;
+
+  const hadReauth =
+    previous?.testStatus === "reauth_required" ||
+    previous?.errorCode === "reauth_required" ||
+    previous?.providerSpecificData?.antigravity?.reauthRequired === true ||
+    next?.errorCode === "reauth_required" ||
+    next?.providerSpecificData?.antigravity?.reauthRequired === true;
+  if (!hadReauth) return;
+
+  if (updates.errorCode === undefined) next.errorCode = null;
+  if (updates.lastError === undefined) next.lastError = null;
+  if (updates.lastErrorAt === undefined) next.lastErrorAt = null;
+
+  const specific = next.providerSpecificData;
+  if (!specific?.antigravity) return;
+
+  const antigravity = { ...specific.antigravity };
+  delete antigravity.reauthRequired;
+  delete antigravity.reauthReason;
+  delete antigravity.reauthRequiredAt;
+
+  if (Object.keys(antigravity).length > 0) {
+    specific.antigravity = antigravity;
+  } else {
+    delete specific.antigravity;
+  }
+  if (Object.keys(specific).length === 0) delete next.providerSpecificData;
+}
+
 export async function createProviderConnection(data) {
   const db = await getDb();
   const now = new Date().toISOString();
@@ -374,11 +405,13 @@ export async function createProviderConnection(data) {
   }
 
   if (existingIndex !== -1) {
+    const previousConnection = db.data.providerConnections[existingIndex];
     db.data.providerConnections[existingIndex] = {
-      ...db.data.providerConnections[existingIndex],
+      ...previousConnection,
       ...data,
       updatedAt: now,
     };
+    clearAntigravityReauthIfActive(previousConnection, db.data.providerConnections[existingIndex], data);
     await safeWrite(db);
     return db.data.providerConnections[existingIndex];
   }
@@ -443,13 +476,15 @@ export async function updateProviderConnection(id, data) {
   const index = db.data.providerConnections.findIndex(c => c.id === id);
   if (index === -1) return null;
 
-  const providerId = db.data.providerConnections[index].provider;
+  const previousConnection = db.data.providerConnections[index];
+  const providerId = previousConnection.provider;
 
   db.data.providerConnections[index] = {
-    ...db.data.providerConnections[index],
+    ...previousConnection,
     ...data,
     updatedAt: new Date().toISOString(),
   };
+  clearAntigravityReauthIfActive(previousConnection, db.data.providerConnections[index], data);
 
   await safeWrite(db);
   if (data.priority !== undefined) await reorderProviderConnections(providerId);
@@ -683,7 +718,7 @@ export async function cleanupProviderConnections() {
     "displayName", "email", "globalPriority", "defaultModel",
     "accessToken", "refreshToken", "expiresAt", "tokenType",
     "scope", "projectId", "apiKey", "testStatus",
-    "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn",
+    "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn", "errorCode",
     "consecutiveUseCount"
   ];
 

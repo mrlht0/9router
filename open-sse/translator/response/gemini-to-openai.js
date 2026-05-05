@@ -1,6 +1,25 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 
+function getThoughtSignature(part) {
+  return part?.thoughtSignature || part?.thought_signature || part?.signature || null;
+}
+
+function attachAntigravityMetadata(delta, signature) {
+  if (!signature) return delta;
+  return {
+    ...delta,
+    providerMetadata: {
+      ...(delta.providerMetadata || {}),
+      antigravity: {
+        ...(delta.providerMetadata?.antigravity || {}),
+        thoughtSignature: signature,
+        signature
+      }
+    }
+  };
+}
+
 // Convert Gemini response chunk to OpenAI format
 export function geminiToOpenAIResponse(chunk, state) {
   if (!chunk) return null;
@@ -34,7 +53,8 @@ export function geminiToOpenAIResponse(chunk, state) {
   // Process parts
   if (content?.parts) {
     for (const part of content.parts) {
-      const hasThoughtSig = part.thoughtSignature || part.thought_signature;
+      const thoughtSignature = getThoughtSignature(part);
+      const hasThoughtSig = !!thoughtSignature;
       const isThought = part.thought === true;
       
       // Handle thought signature (thinking mode)
@@ -50,9 +70,10 @@ export function geminiToOpenAIResponse(chunk, state) {
             model: state.model,
             choices: [{
               index: 0,
-              delta: isThought 
-                ? { reasoning_content: part.text }
-                : { content: part.text },
+              delta: attachAntigravityMetadata(
+                isThought ? { reasoning_content: part.text } : { content: part.text },
+                thoughtSignature
+              ),
               finish_reason: null
             }]
           });
@@ -65,7 +86,7 @@ export function geminiToOpenAIResponse(chunk, state) {
           const fcArgs = part.functionCall.args || {};
           const toolCallIndex = state.functionIndex++;
           
-          const toolCall = {
+          const toolCall = attachAntigravityMetadata({
             id: `${fcName}-${Date.now()}-${toolCallIndex}`,
             index: toolCallIndex,
             type: "function",
@@ -73,7 +94,7 @@ export function geminiToOpenAIResponse(chunk, state) {
               name: fcName,
               arguments: JSON.stringify(fcArgs)
             }
-          };
+          }, thoughtSignature);
           
           state.toolCalls.set(toolCallIndex, toolCall);
           
@@ -242,4 +263,3 @@ register(FORMATS.GEMINI, FORMATS.OPENAI, null, geminiToOpenAIResponse);
 register(FORMATS.GEMINI_CLI, FORMATS.OPENAI, null, geminiToOpenAIResponse);
 register(FORMATS.ANTIGRAVITY, FORMATS.OPENAI, null, geminiToOpenAIResponse);
 register(FORMATS.VERTEX, FORMATS.OPENAI, null, geminiToOpenAIResponse);
-

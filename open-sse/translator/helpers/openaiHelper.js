@@ -4,6 +4,18 @@
 export const VALID_OPENAI_CONTENT_TYPES = ["text", "image_url", "image"];
 export const VALID_OPENAI_MESSAGE_TYPES = ["text", "image_url", "image", "tool_calls", "tool_result"];
 
+function isTextOnlyContent(content) {
+  return content.length > 0 && content.every(block => block.type === "text");
+}
+
+function normalizeOpenAIContent(content) {
+  if (isTextOnlyContent(content)) {
+    return content.map(block => block.text || "").join("\n");
+  }
+
+  return content;
+}
+
 // Filter messages to OpenAI standard format
 // Remove: thinking, redacted_thinking, signature, and other non-OpenAI blocks
 export function filterToOpenAIFormat(body) {
@@ -13,8 +25,8 @@ export function filterToOpenAIFormat(body) {
     // Keep tool messages as-is (OpenAI format)
     if (msg.role === "tool") return msg;
     
-    // Keep assistant messages with tool_calls as-is
-    if (msg.role === "assistant" && msg.tool_calls) return msg;
+    // Keep assistant messages with tool_calls/reasoning as-is
+    if (msg.role === "assistant" && (msg.tool_calls || msg.reasoning_content)) return msg;
     
     // Handle string content
     if (typeof msg.content === "string") return msg;
@@ -47,7 +59,7 @@ export function filterToOpenAIFormat(body) {
         filteredContent.push({ type: "text", text: "" });
       }
       
-      return { ...msg, content: filteredContent };
+      return { ...msg, content: normalizeOpenAIContent(filteredContent) };
     }
     
     return msg;
@@ -59,6 +71,8 @@ export function filterToOpenAIFormat(body) {
     if (msg.role === "tool") return true;
     // Always keep assistant messages with tool_calls
     if (msg.role === "assistant" && msg.tool_calls) return true;
+    // Keep reasoning-only assistant messages for provider-specific round trips
+    if (msg.role === "assistant" && msg.reasoning_content) return true;
     
     if (typeof msg.content === "string") return msg.content.trim() !== "";
     if (Array.isArray(msg.content)) {
@@ -124,4 +138,3 @@ export function filterToOpenAIFormat(body) {
 
   return body;
 }
-

@@ -62,6 +62,10 @@ function getCandidatePaths(platform) {
   ];
 }
 
+function isSupportedPlatform(platform) {
+  return platform === "darwin" || platform === "linux" || platform === "win32";
+}
+
 const normalize = (value) => {
   if (typeof value !== "string") return value;
   try {
@@ -72,45 +76,78 @@ const normalize = (value) => {
   }
 };
 
+function extractTokensFromRows(rows = []) {
+  const tokens = { accessToken: null, machineId: null };
+
+  for (const row of rows) {
+    if (ACCESS_TOKEN_KEYS.includes(row.key) && !tokens.accessToken) {
+      tokens.accessToken = normalize(row.value);
+    } else if (MACHINE_ID_KEYS.includes(row.key) && !tokens.machineId) {
+      tokens.machineId = normalize(row.value);
+    }
+  }
+
+  return tokens;
+}
+
+function applyFuzzyRows(tokens, rows = []) {
+  for (const row of rows) {
+    const key = row.key || "";
+    const value = normalize(row.value);
+
+    if (!tokens.accessToken && key.toLowerCase().includes("accesstoken")) {
+      tokens.accessToken = value;
+    }
+
+    if (!tokens.machineId && key.toLowerCase().includes("machineid")) {
+      tokens.machineId = value;
+    }
+  }
+
+  return tokens;
+}
+
 /**
  * Extract tokens via better-sqlite3 (bundled dependency).
  * This is the preferred strategy — no external CLI required.
  */
-function extractTokensViaBetterSqlite(dbPath) {
+async function loadBetterSqlite() {
+  try {
+    const mod = await import("better-sqlite3");
+    return mod.default || mod;
+  } catch {
+    // Dynamic require works in Next's CommonJS route runtime; Vitest ESM may
+    // not provide it, so import() remains the first path for unit mocks.
+    // eslint-disable-next-line no-undef, @typescript-eslint/no-require-imports
+    const mod = require("better-sqlite3");
+    return mod.default || mod;
+  }
+}
+
+async function extractTokensViaBetterSqlite(dbPath) {
   // Dynamic require so the route stays importable even if native bindings fail
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const Database = require("better-sqlite3");
+  const Database = await loadBetterSqlite();
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
 
-  const query = (key) => {
-    const row = db.prepare("SELECT value FROM itemTable WHERE key=? LIMIT 1").get(key);
-    return row?.value || null;
-  };
+  try {
+    const desiredKeys = [...ACCESS_TOKEN_KEYS, ...MACHINE_ID_KEYS];
+    const rows = db.prepare(
+      `SELECT key, value FROM itemTable WHERE key IN (${desiredKeys.map(() => "?").join(",")})`,
+    ).all(...desiredKeys);
 
-  const normalize = (value) => {
-    if (typeof value !== "string") return value;
-    try {
-      const parsed = JSON.parse(value);
-      return typeof parsed === "string" ? parsed : value;
-    } catch {
-      return value;
+    const tokens = extractTokensFromRows(rows);
+    if (!tokens.accessToken || !tokens.machineId) {
+      const fallbackRows = db.prepare(
+        "SELECT key, value FROM itemTable WHERE key LIKE '%cursorAuth/%' OR key LIKE '%machineId%' OR key LIKE '%serviceMachineId%'",
+      ).all();
+      applyFuzzyRows(tokens, fallbackRows);
     }
-  };
 
-  let accessToken = null;
-  for (const key of ACCESS_TOKEN_KEYS) {
-    const raw = query(key);
-    if (raw) { accessToken = normalize(raw); break; }
+    return tokens;
+  } finally {
+    db.close();
   }
-
-  let machineId = null;
-  for (const key of MACHINE_ID_KEYS) {
-    const raw = query(key);
-    if (raw) { machineId = normalize(raw); break; }
-  }
-
-  db.close();
-  return { accessToken, machineId };
 }
 
 /**
@@ -177,6 +214,14 @@ async function extractTokensViaCLI(dbPath) {
 export async function GET() {
   try {
     const platform = process.platform;
+
+    if (!isSupportedPlatform(platform)) {
+      return NextResponse.json(
+        { error: "Unsupported platform", found: false },
+        { status: 400 },
+      );
+    }
+
     const candidates = getCandidatePaths(platform);
 
     let dbPath = null;
@@ -220,7 +265,7 @@ export async function GET() {
 
     // Strategy 1: better-sqlite3 (bundled — no external tools required)
     try {
-      const tokens = extractTokensViaBetterSqlite(dbPath);
+      const tokens = await extractTokensViaBetterSqlite(dbPath);
       if (tokens.accessToken && tokens.machineId) {
         return NextResponse.json({
           found: true,

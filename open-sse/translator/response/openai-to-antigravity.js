@@ -1,5 +1,15 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
+import { DEFAULT_THINKING_AG_SIGNATURE } from "../../config/defaultThinkingSignature.js";
+
+function getAntigravitySignature(source, fallback = DEFAULT_THINKING_AG_SIGNATURE) {
+  const metadata = source?.providerMetadata || source?.provider_metadata;
+  return metadata?.antigravity?.thoughtSignature
+    || metadata?.antigravity?.signature
+    || source?.thoughtSignature
+    || source?.signature
+    || fallback;
+}
 
 // Convert OpenAI SSE chunk to Antigravity SSE format
 // Real Antigravity format:
@@ -23,12 +33,18 @@ export function openaiToAntigravityResponse(chunk, state) {
   if (!state._toolCallAccum) state._toolCallAccum = {};
   if (!state._responseId) state._responseId = chunk.id || `resp_${Date.now()}`;
   if (!state._modelVersion) state._modelVersion = chunk.model || "";
+  const chunkSignature = getAntigravitySignature(delta, null);
+  if (chunkSignature) state._antigravityThoughtSignature = chunkSignature;
 
   const parts = [];
 
   // Thinking/reasoning → thought part
   if (delta.reasoning_content) {
-    parts.push({ thought: true, text: delta.reasoning_content });
+    parts.push({
+      thought: true,
+      text: delta.reasoning_content,
+      thoughtSignature: getAntigravitySignature(delta, state._antigravityThoughtSignature || DEFAULT_THINKING_AG_SIGNATURE)
+    });
   }
 
   // Text content
@@ -41,9 +57,11 @@ export function openaiToAntigravityResponse(chunk, state) {
     for (const tc of delta.tool_calls) {
       const idx = tc.index ?? 0;
       if (!state._toolCallAccum[idx]) {
-        state._toolCallAccum[idx] = { id: "", name: "", arguments: "" };
+        state._toolCallAccum[idx] = { id: "", name: "", arguments: "", signature: "" };
       }
       const accum = state._toolCallAccum[idx];
+      const toolSignature = getAntigravitySignature(tc, null);
+      if (toolSignature) accum.signature = toolSignature;
       if (tc.id) accum.id = tc.id;
       if (tc.function?.name) accum.name += tc.function.name;
       if (tc.function?.arguments) accum.arguments += tc.function.arguments;
@@ -62,6 +80,7 @@ export function openaiToAntigravityResponse(chunk, state) {
       // Restore original tool name if it was prefixed during cloaking
       const originalName = state.toolNameMap?.get(accum.name) || accum.name;
       parts.push({
+        thoughtSignature: accum.signature || state._antigravityThoughtSignature || DEFAULT_THINKING_AG_SIGNATURE,
         functionCall: {
           name: originalName,
           args
