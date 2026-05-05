@@ -224,6 +224,9 @@ export class CodexExecutor extends BaseExecutor {
     delete body.stream_options; // Cursor sends this but Codex doesn't support it
     delete body.safety_identifier; // Droid CLI sends this but Codex doesn't support it
 
+    // Preserve service_tier for Fast Mode support (e.g. service_tier: "fast")
+    // Codex CLI sends this when fast_mode is enabled in config.toml
+
     return body;
   }
 }
