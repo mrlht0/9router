@@ -224,8 +224,11 @@ function mapDeepSeekToolToClaudeCode(name, params) {
     if (outputMode) args.output_mode = outputMode;
     return { tool: "Grep", args };
   }
-  if (n === "WebSearch") {
-    return { tool: "WebSearch", args: { query: pickFirst(params, ["query", "q", "search"]) } };
+  if (n === "WebSearch" || n === "web_search" || n === "WebSearchTool") {
+    return {
+      tool: "WebSearch",
+      args: { query: pickFirst(params, ["query", "search_term", "q", "search", "term"]) }
+    };
   }
   if (n === "WebFetch" || n === "WebViewer" || n === "web_viewer") {
     return {
@@ -234,6 +237,63 @@ function mapDeepSeekToolToClaudeCode(name, params) {
         url: pickFirst(params, ["url", "uri", "link"]),
         prompt: pickFirst(params, ["prompt", "question"]) || "Fetch and summarize this page"
       }
+    };
+  }
+  if (n === "MultiEdit" || n === "multi_edit" || n === "BatchEdit" || n === "batch_edit") {
+    const filePath = pickFirst(params, ["file_path", "path", "target_file"]);
+    let edits = [];
+    const editsRaw = pickFirst(params, ["edits", "changes", "patches"]);
+    if (editsRaw) {
+      try {
+        const parsed = JSON.parse(editsRaw);
+        if (Array.isArray(parsed)) {
+          edits = parsed.map((e) => ({
+            old_string: e.old_string ?? e.old ?? e.old_str ?? "",
+            new_string: e.new_string ?? e.new ?? e.new_str ?? "",
+            ...(e.replace_all ? { replace_all: true } : {})
+          }));
+        }
+      } catch { /* fall through with empty edits */ }
+    }
+    return { tool: "MultiEdit", args: { file_path: filePath, edits } };
+  }
+  if (n === "NotebookEdit" || n === "notebook_edit" || n === "EditNotebook") {
+    const args = {
+      notebook_path: pickFirst(params, ["notebook_path", "file_path", "path"]),
+      new_source: pickFirst(params, ["new_source", "source", "content", "new_string"])
+    };
+    const cellId = pickFirst(params, ["cell_id"]);
+    if (cellId) args.cell_id = cellId;
+    const cellType = pickFirst(params, ["cell_type"]);
+    if (cellType) args.cell_type = cellType;
+    const editMode = pickFirst(params, ["edit_mode"]);
+    if (editMode) args.edit_mode = editMode;
+    return { tool: "NotebookEdit", args };
+  }
+  if (n === "Task" || n === "Agent" || n === "SpawnAgent" || n === "spawn_agent" || n === "SubAgent") {
+    const args = {
+      description: pickFirst(params, ["description", "summary", "title"]),
+      prompt: pickFirst(params, ["prompt", "task", "instructions", "input"])
+    };
+    const subagent = pickFirst(params, ["subagent_type", "agent_type", "type"]);
+    if (subagent) args.subagent_type = subagent;
+    return { tool: "Task", args };
+  }
+  if (n === "TodoWrite" || n === "todo_write" || n === "WriteTodos" || n === "UpdateTodos") {
+    let todos = [];
+    const todosRaw = pickFirst(params, ["todos", "items", "tasks"]);
+    if (todosRaw) {
+      try {
+        const parsed = JSON.parse(todosRaw);
+        if (Array.isArray(parsed)) todos = parsed;
+      } catch { /* leave empty */ }
+    }
+    return { tool: "TodoWrite", args: { todos } };
+  }
+  if (n === "ExitPlanMode" || n === "exit_plan_mode" || n === "FinishPlan") {
+    return {
+      tool: "ExitPlanMode",
+      args: { plan: pickFirst(params, ["plan", "summary", "content"]) }
     };
   }
   // Fallback: pass through using whatever the model emitted. Removes empty keys.

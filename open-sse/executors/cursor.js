@@ -473,14 +473,19 @@ export class CursorExecutor extends BaseExecutor {
     debugLog(`[CURSOR BUFFER] Final toolCalls count: ${toolCalls.length}`);
 
     // DeepSeek-embedded tool calls (see SSE path for context).
+    // See SSE-path comment above for rationale.
+    const _jsonHasDsTokens = totalThinking.includes("<｜tool▁call▁begin｜>");
+    const _jsonHasThinkBoundary = totalThinking.includes("</think>");
     if (
-      toolCalls.length === 0 &&
-      totalContent.length === 0 &&
-      totalThinking.includes("<｜tool▁call▁begin｜>")
+      _jsonHasDsTokens ||
+      (toolCalls.length === 0 && totalContent.length === 0 && _jsonHasThinkBoundary)
     ) {
       const { cotText, assistantText, toolCalls: dsCalls } =
         extractDeepSeekResponse(totalThinking);
-      if (dsCalls.length > 0) {
+      if (dsCalls.length > 0 || assistantText.length > 0) {
+        const replacedCount = toolCalls.length;
+        // Discard native tool_calls (likely empty-args from Cursor's failed parse)
+        toolCalls.length = 0;
         for (const c of dsCalls) {
           toolCalls.push({
             id: `toolu_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
@@ -491,7 +496,7 @@ export class CursorExecutor extends BaseExecutor {
         if (assistantText) totalContent = assistantText;
         totalThinking = cotText;
         console.log(
-          `[CURSOR DEEPSEEK REWRITE] (json) detected ${dsCalls.length} tool call(s) → ${toolCalls.map((tc) => tc.function.name).join(",")} (cot_len=${cotText.length}, assistant_len=${assistantText.length})`
+          `[CURSOR DEEPSEEK REWRITE] (json) detected ${dsCalls.length} tool call(s) → ${toolCalls.map((tc) => tc.function.name).join(",") || "(none)"} (cot_len=${cotText.length}, assistant_len=${assistantText.length}, replaced_native_count=${replacedCount})`
         );
       }
     }
@@ -793,22 +798,33 @@ export class CursorExecutor extends BaseExecutor {
     // protobuf field, using <｜tool▁call▁begin｜>...<｜tool▁call▁end｜> tokens. We
     // split it apart and re-emit as proper SSE chunks so Claude Code sees a normal
     // tool_use call.
+    // Trigger rewrite if EITHER:
+    //   - DeepSeek tool tokens exist (regardless of toolCalls/totalContent state) — Cursor
+    //     backend often emits an accompanying native ClientSideToolV2Call frame with
+    //     `raw_args={}` (empty) because it can't extract args from DeepSeek tokens. We
+    //     must override that empty native call with the DeepSeek-parsed args.
+    //   - OR no toolCalls/content yet AND a </think> boundary exists (pure text response
+    //     trapped inside thinking field).
+    const _hasDsTokens = totalThinking.includes("<｜tool▁call▁begin｜>");
+    const _hasThinkBoundary = totalThinking.includes("</think>");
     if (
-      toolCalls.length === 0 &&
-      totalContent.length === 0 &&
-      totalThinking.includes("<｜tool▁call▁begin｜>")
+      _hasDsTokens ||
+      (toolCalls.length === 0 && totalContent.length === 0 && _hasThinkBoundary)
     ) {
       const { cotText, assistantText, toolCalls: dsCalls } =
         extractDeepSeekResponse(totalThinking);
-      if (dsCalls.length > 0) {
+      const hasUseful = dsCalls.length > 0 || assistantText.length > 0;
+      if (hasUseful) {
         const synthesised = dsCalls.map((c) => ({
           id: `toolu_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
           type: "function",
           function: { name: c.tool, arguments: JSON.stringify(c.args) }
         }));
         console.log(
-          `[CURSOR DEEPSEEK REWRITE] detected ${dsCalls.length} tool call(s) → ${synthesised.map((tc) => tc.function.name).join(",")} (cot_len=${cotText.length}, assistant_len=${assistantText.length})`
+          `[CURSOR DEEPSEEK REWRITE] detected ${dsCalls.length} tool call(s) → ${synthesised.map((tc) => tc.function.name).join(",") || "(none)"} (cot_len=${cotText.length}, assistant_len=${assistantText.length}, replaced_native_count=${toolCalls.length})`
         );
+        // Discard any native (likely empty-args) tool_calls — DeepSeek tokens are the source of truth here
+        toolCalls.length = 0;
 
         const rebuilt = [];
         // Initial role marker

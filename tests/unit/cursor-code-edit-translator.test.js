@@ -244,6 +244,136 @@ describe("DeepSeek-embedded tool calls", () => {
     });
   });
 
+  it("maps DeepSeek WebSearch with search_term to WebSearch.query", () => {
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>WebSearch<｜tool▁sep｜>search_term",
+      "SvelteKit framework routing adapters documentation 2024",
+      "<｜tool▁sep｜>explanation",
+      "Mengambil ringkasan dokumentasi resmi SvelteKit",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "WebSearch",
+      args: { query: "SvelteKit framework routing adapters documentation 2024" }
+    });
+  });
+
+  it("splits </think> boundary even when no tool tokens are present", () => {
+    const thinking = [
+      "User asked to update test.md.",
+      "I will apply the change and confirm.",
+      "</think>",
+      "**Sudah diperbarui.** File `test.md` sekarang berjudul **Perangkat lunak**."
+    ].join("\n");
+    const { cotText, assistantText, toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls).toHaveLength(0);
+    expect(cotText).toContain("User asked");
+    expect(assistantText).toContain("Sudah diperbarui");
+    expect(assistantText).not.toContain("</think>");
+  });
+
+  it("maps MultiEdit with edits JSON array", () => {
+    const editsJson = JSON.stringify([
+      { old_string: "foo", new_string: "bar" },
+      { old: "baz", new: "qux", replace_all: true }
+    ]);
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>MultiEdit<｜tool▁sep｜>path",
+      "/repo/a.md",
+      "<｜tool▁sep｜>edits",
+      editsJson,
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0].tool).toBe("MultiEdit");
+    expect(toolCalls[0].args.file_path).toBe("/repo/a.md");
+    expect(toolCalls[0].args.edits).toEqual([
+      { old_string: "foo", new_string: "bar" },
+      { old_string: "baz", new_string: "qux", replace_all: true }
+    ]);
+  });
+
+  it("maps NotebookEdit with cell_id and cell_type", () => {
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>NotebookEdit<｜tool▁sep｜>notebook_path",
+      "/repo/n.ipynb",
+      "<｜tool▁sep｜>cell_id",
+      "abc",
+      "<｜tool▁sep｜>cell_type",
+      "code",
+      "<｜tool▁sep｜>new_source",
+      "print('hi')",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "NotebookEdit",
+      args: {
+        notebook_path: "/repo/n.ipynb",
+        new_source: "print('hi')",
+        cell_id: "abc",
+        cell_type: "code"
+      }
+    });
+  });
+
+  it("maps Task / SpawnAgent to Task with subagent_type", () => {
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>SpawnAgent<｜tool▁sep｜>description",
+      "audit branch",
+      "<｜tool▁sep｜>prompt",
+      "Check if ready to ship",
+      "<｜tool▁sep｜>subagent_type",
+      "general-purpose",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "Task",
+      args: {
+        description: "audit branch",
+        prompt: "Check if ready to ship",
+        subagent_type: "general-purpose"
+      }
+    });
+  });
+
+  it("maps TodoWrite with todos JSON array", () => {
+    const todosJson = JSON.stringify([
+      { content: "do thing", status: "pending", activeForm: "doing thing" }
+    ]);
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>TodoWrite<｜tool▁sep｜>todos",
+      todosJson,
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0].tool).toBe("TodoWrite");
+    expect(toolCalls[0].args.todos).toEqual([
+      { content: "do thing", status: "pending", activeForm: "doing thing" }
+    ]);
+  });
+
+  it("maps ExitPlanMode with plan", () => {
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>ExitPlanMode<｜tool▁sep｜>plan",
+      "1. step one\n2. step two",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "ExitPlanMode",
+      args: { plan: "1. step one\n2. step two" }
+    });
+  });
+
   it("parses multiple tool calls in one block", () => {
     const text = [
       "<｜tool▁calls▁begin｜>",
