@@ -6,6 +6,7 @@ import {
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
 import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
+import { getDisabledModels } from "@/lib/disabledModelsDb";
 
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
@@ -149,6 +150,13 @@ export async function buildModelsList(kindFilter) {
     modelAliases = await getModelAliases();
   } catch (e) {
     console.log("Could not fetch model aliases");
+  }
+
+  let disabledModels = {};
+  try {
+    disabledModels = await getDisabledModels();
+  } catch (e) {
+    console.log("Could not fetch disabled models");
   }
 
   const activeConnectionByProvider = new Map();
@@ -296,8 +304,17 @@ export async function buildModelsList(kindFilter) {
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
       const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
+      const disabledForProvider = new Set([
+        ...(disabledModels[outputAlias] || []),
+        ...(disabledModels[staticAlias] || []),
+        ...(disabledModels[providerId] || []),
+      ]);
 
       for (const modelId of mergedModelIds) {
+        if (disabledForProvider.has(modelId) || disabledForProvider.has(`${outputAlias}/${modelId}`)) {
+          continue;
+        }
+
         // Resolve kind: prefer static metadata, otherwise infer from ID heuristics
         const kind = staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
         if (!kindFilter.includes(kind)) continue;
