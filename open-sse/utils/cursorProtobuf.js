@@ -646,9 +646,6 @@ export function encodeRequest(messages, modelName, tools = [], reasoningEffort =
   let thinkingLevel = THINKING_LEVEL.UNSPECIFIED;
   if (reasoningEffort === "medium") thinkingLevel = THINKING_LEVEL.MEDIUM;
   else if (reasoningEffort === "high") thinkingLevel = THINKING_LEVEL.HIGH;
-  const preferredToolName = typeof toolChoice === "object"
-    ? (toolChoice?.function?.name || toolChoice?.name || null)
-    : null;
 
   const totalToolCount = Array.isArray(tools) ? tools.length : 0;
   const allToolNames = (tools || [])
@@ -659,10 +656,22 @@ export function encodeRequest(messages, modelName, tools = [], reasoningEffort =
   const mcpServerCount = new Set(
     allToolNames.map((name) => parseMcpToolName(name).server)
   ).size;
-  const preferredToolLogName =
-    typeof toolChoice === "string" ? toolChoice : (preferredToolName || "none");
+  const explicitToolChoiceLog =
+    typeof toolChoice === "string"
+      ? toolChoice
+      : (toolChoice?.function?.name || toolChoice?.name || "none");
+
+  // Override Cursor's default training that emits ```N:N:filename code-edit blocks
+  // for IDE fast-apply. In headless API mode the client (Claude Code, etc.) cannot
+  // parse those blocks — it expects native tool_use calls. This instruction is
+  // injected only when the request is agentic AND has tools available.
+  const agentInstruction =
+    isAgentic && totalToolCount > 0
+      ? "You are operating as an autonomous agent in headless API mode. You MUST execute every action via direct tool calls. To modify files, call the Edit tool (file_path, old_string, new_string) or Write tool (file_path, content). Do NOT emit `N:N:filename` code-edit markdown blocks — they will not be applied. Do NOT tell the user to switch modes. Always respond by calling the appropriate tool from the tools list."
+      : "";
+
   console.log(
-    `[CURSOR PROTO ENCODE] model=${modelName} mode=${modeCfg.name} isAgentic=${isAgentic ? 1 : 0} messages=${formattedMessages.length} total_tools=${totalToolCount} prefixed_mcp_tools=${prefixedMcpToolNames.length} builtin_or_custom_tools=${builtinOrCustomToolNames.length} logical_servers=${mcpServerCount} tool_choice=${preferredToolLogName}`
+    `[CURSOR PROTO ENCODE] model=${modelName} mode=${modeCfg.name} isAgentic=${isAgentic ? 1 : 0} messages=${formattedMessages.length} total_tools=${totalToolCount} prefixed_mcp_tools=${prefixedMcpToolNames.length} builtin_or_custom_tools=${builtinOrCustomToolNames.length} logical_servers=${mcpServerCount} tool_choice=${explicitToolChoiceLog} agent_instruction=${agentInstruction ? "on" : "off"}`
   );
   if (prefixedMcpToolNames.length > 0) {
     console.log(
@@ -686,15 +695,7 @@ export function encodeRequest(messages, modelName, tools = [], reasoningEffort =
     
     // Static fields
     encodeField(FIELD.UNKNOWN_2, WIRE_TYPE.VARINT, 1),
-    encodeField(
-      FIELD.INSTRUCTION,
-      WIRE_TYPE.LEN,
-      encodeInstruction(
-        preferredToolName
-          ? `Use tool ${preferredToolName} when it is available and relevant to the user request. If listed in tools, do not claim it is unavailable.`
-          : ""
-      )
-    ),
+    encodeField(FIELD.INSTRUCTION, WIRE_TYPE.LEN, encodeInstruction(agentInstruction)),
     encodeField(FIELD.UNKNOWN_4, WIRE_TYPE.VARINT, 1),
     encodeField(FIELD.MODEL, WIRE_TYPE.LEN, encodeModel(modelName)),
     encodeField(FIELD.WEB_TOOL, WIRE_TYPE.LEN, ""),

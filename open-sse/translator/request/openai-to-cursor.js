@@ -2,6 +2,10 @@
  * OpenAI to Cursor Request Translator
  * Converts OpenAI messages to Cursor ask/agent format.
  *
+ * Tool selection is delegated entirely to the model (native dynamic tool calling).
+ * No keyword-based inference, reordering, or prompt injection — tools list and any
+ * explicit tool_choice from the client flow through unchanged.
+ *
  * Important: Cursor can loop when tool outputs are sent via protobuf tool_results
  * with partial schema mismatches. For stability, tool outputs are represented as
  * structured text blocks in user messages.
@@ -47,80 +51,9 @@ function normalizeToolCallId(id) {
   return typeof id === "string" ? id.split("\n")[0] : "";
 }
 
-function collectUserText(messages) {
-  return (messages || [])
-    .filter(msg => msg?.role === "user")
-    .map(msg => extractContent(msg?.content))
-    .filter(Boolean)
-    .join("\n")
-    .toLowerCase();
-}
-
-function tokenize(text) {
-  return String(text || "")
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/)
-    .map(t => t.trim())
-    .filter(Boolean);
-}
-
-function normalizeToolName(rawName) {
-  if (typeof rawName !== "string") return "";
-  if (rawName.startsWith("mcp__")) return rawName.slice("mcp__".length).replace(/__/g, " ");
-  return rawName.replace(/_/g, " ");
-}
-
-function isLowSignalToken(token) {
-  return token.length < 3 || ["the", "and", "for", "with", "tool", "tools", "mcp", "use"].includes(token);
-}
-
-function detectPreferredToolChoice(messages, tools) {
-  const text = collectUserText(messages);
-  if (!text) return null;
-  const userTokens = tokenize(text).filter(t => !isLowSignalToken(t));
-  if (userTokens.length === 0) return null;
-  const isDocsSearchIntent =
-    /\b(search|docs?|documentation|library|reference|manual|guide)\b/.test(text);
-
-  let best = null;
-  for (const tool of tools || []) {
-    const name = tool?.function?.name || tool?.name || "";
-    if (!name || typeof name !== "string" || !name.startsWith("mcp__")) continue;
-    const desc = tool?.function?.description || tool?.description || "";
-    const haystack = `${normalizeToolName(name)} ${desc}`.toLowerCase();
-    let score = userTokens.reduce((sum, token) => (haystack.includes(token) ? sum + 1 : sum), 0);
-    if (isDocsSearchIntent) {
-      if (/\b(query|search|docs?|documentation)\b/.test(haystack)) score += 2;
-      if (/\bresolve|list|id\b/.test(haystack)) score -= 1;
-    }
-    if (score <= 0) continue;
-    if (!best || score > best.score) best = { name, score };
-  }
-
-  if (!best || best.score < 1) return null;
-  return { type: "function", function: { name: best.name } };
-}
-
-function prioritizeToolsByChoice(tools, toolChoice) {
-  if (!Array.isArray(tools) || tools.length < 2) return tools;
-  const preferredName = typeof toolChoice === "object"
-    ? (toolChoice?.function?.name || toolChoice?.name || "")
-    : "";
-  if (!preferredName) return tools;
-  const idx = tools.findIndex((tool) => {
-    const name = tool?.function?.name || tool?.name || "";
-    return name === preferredName;
-  });
-  if (idx <= 0) return tools;
-  const reordered = tools.slice();
-  const [picked] = reordered.splice(idx, 1);
-  reordered.unshift(picked);
-  return reordered;
-}
-
 function convertMessages(messages) {
   const result = [];
-  
+
   // Build a map of tool_call_id -> tool name from assistant tool calls
   const toolCallMetaMap = new Map();
   const rememberToolMeta = (toolCallId, toolName) => {
@@ -243,15 +176,12 @@ export function buildCursorRequest(model, body, stream, credentials) {
 
   // Strip fields irrelevant to Cursor (OpenAI/Anthropic-specific)
   const { user, metadata, stream_options, system, ...rest } = body;
-  const inferredToolChoice = detectPreferredToolChoice(body.messages || [], body.tools || []);
-  const finalToolChoice = body.tool_choice || inferredToolChoice;
-  const prioritizedTools = prioritizeToolsByChoice(body.tools || [], finalToolChoice);
 
   return {
     ...rest,
     messages,
-    ...(Array.isArray(body.tools) ? { tools: prioritizedTools } : {}),
-    ...(finalToolChoice ? { tool_choice: finalToolChoice } : {}),
+    ...(Array.isArray(body.tools) ? { tools: body.tools } : {}),
+    ...(body.tool_choice ? { tool_choice: body.tool_choice } : {}),
     max_tokens: 32000
   };
 }
