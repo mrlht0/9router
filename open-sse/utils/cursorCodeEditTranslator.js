@@ -163,7 +163,16 @@ function pickFirst(obj, keys) {
 function mapDeepSeekToolToClaudeCode(name, params) {
   const n = (name || "").trim();
   // StrReplace ≡ Edit. DeepSeek uses `path`; Claude Code uses `file_path`.
-  if (n === "StrReplace" || n === "str_replace" || n === "Edit") {
+  if (
+    n === "StrReplace" ||
+    n === "str_replace" ||
+    n === "Edit" ||
+    n === "edit" ||
+    n === "EditFile" ||
+    n === "edit_file" ||
+    n === "Replace" ||
+    n === "replace"
+  ) {
     return {
       tool: "Edit",
       args: {
@@ -173,7 +182,18 @@ function mapDeepSeekToolToClaudeCode(name, params) {
       }
     };
   }
-  if (n === "View" || n === "Read" || n === "ReadFile" || n === "read_file") {
+  if (
+    n === "View" ||
+    n === "view" ||
+    n === "Read" ||
+    n === "read" ||
+    n === "ReadFile" ||
+    n === "read_file" ||
+    n === "Cat" ||
+    n === "cat" ||
+    n === "OpenFile" ||
+    n === "open_file"
+  ) {
     return {
       tool: "Read",
       args: {
@@ -181,7 +201,18 @@ function mapDeepSeekToolToClaudeCode(name, params) {
       }
     };
   }
-  if (n === "Create" || n === "Write" || n === "WriteFile" || n === "write_file") {
+  if (
+    n === "Create" ||
+    n === "create" ||
+    n === "Write" ||
+    n === "write" ||
+    n === "WriteFile" ||
+    n === "write_file" ||
+    n === "CreateFile" ||
+    n === "create_file" ||
+    n === "NewFile" ||
+    n === "new_file"
+  ) {
     return {
       tool: "Write",
       args: {
@@ -190,7 +221,18 @@ function mapDeepSeekToolToClaudeCode(name, params) {
       }
     };
   }
-  if (n === "Bash" || n === "BashTool" || n === "RunCommand" || n === "run_terminal_command") {
+  if (
+    n === "Bash" ||
+    n === "BashTool" ||
+    n === "RunCommand" ||
+    n === "run_terminal_command" ||
+    n === "run_terminal_cmd" ||
+    n === "RunTerminalCmd" ||
+    n === "Shell" ||
+    n === "shell" ||
+    n === "Terminal" ||
+    n === "terminal"
+  ) {
     const args = {
       command: pickFirst(params, ["command", "cmd", "script"])
     };
@@ -198,7 +240,16 @@ function mapDeepSeekToolToClaudeCode(name, params) {
     if (description) args.description = description;
     return { tool: "Bash", args };
   }
-  if (n === "Glob" || n === "FileSearch" || n === "file_search") {
+  if (
+    n === "Glob" ||
+    n === "glob" ||
+    n === "FileSearch" ||
+    n === "file_search" ||
+    n === "FindFile" ||
+    n === "find_file" ||
+    n === "FindFiles" ||
+    n === "find_files"
+  ) {
     const args = {
       pattern: pickFirst(params, ["pattern", "glob_pattern", "query"])
     };
@@ -206,13 +257,39 @@ function mapDeepSeekToolToClaudeCode(name, params) {
     if (dirPath) args.path = dirPath;
     return { tool: "Glob", args };
   }
-  if (n === "LS" || n === "ListDir" || n === "list_dir" || n === "ListDirectory") {
+  if (
+    n === "LS" ||
+    n === "ls" ||
+    n === "ListDir" ||
+    n === "List_dir" ||
+    n === "list_dir" ||
+    n === "Listdir" ||
+    n === "ListDirectory" ||
+    n === "list_directory" ||
+    n === "Dir" ||
+    n === "dir"
+  ) {
     return {
       tool: "LS",
       args: { path: pickFirst(params, ["path", "target_directory", "directory"]) }
     };
   }
-  if (n === "Grep" || n === "GrepSearch" || n === "grep_search" || n === "RipgrepSearch" || n === "Search") {
+  if (
+    n === "Grep" ||
+    n === "grep" ||
+    n === "GrepSearch" ||
+    n === "grep_search" ||
+    n === "RipgrepSearch" ||
+    n === "ripgrep_search" ||
+    n === "Ripgrep" ||
+    n === "ripgrep" ||
+    n === "Rg" ||
+    n === "rg" ||
+    n === "Search" ||
+    n === "search" ||
+    n === "TextSearch" ||
+    n === "text_search"
+  ) {
     const args = {
       pattern: pickFirst(params, ["pattern", "query", "regex"])
     };

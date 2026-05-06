@@ -244,6 +244,30 @@ describe("DeepSeek-embedded tool calls", () => {
     });
   });
 
+  it("maps Shell / Terminal aliases to Bash", () => {
+    for (const name of ["Shell", "shell", "Terminal", "run_terminal_cmd", "RunTerminalCmd"]) {
+      const thinking = `</think>\n<｜tool▁call▁begin｜>${name}<｜tool▁sep｜>command\nls\n<｜tool▁call▁end｜>`;
+      const { toolCalls } = extractDeepSeekResponse(thinking);
+      expect(toolCalls[0]).toEqual({ tool: "Bash", args: { command: "ls" } });
+    }
+  });
+
+  it("maps List_dir / Listdir / Dir aliases to LS", () => {
+    for (const name of ["List_dir", "Listdir", "list_directory", "Dir", "dir"]) {
+      const thinking = `</think>\n<｜tool▁call▁begin｜>${name}<｜tool▁sep｜>target_directory\n/repo\n<｜tool▁call▁end｜>`;
+      const { toolCalls } = extractDeepSeekResponse(thinking);
+      expect(toolCalls[0]).toEqual({ tool: "LS", args: { path: "/repo" } });
+    }
+  });
+
+  it("maps Cat / OpenFile aliases to Read", () => {
+    for (const name of ["Cat", "cat", "OpenFile", "open_file", "view"]) {
+      const thinking = `</think>\n<｜tool▁call▁begin｜>${name}<｜tool▁sep｜>path\n/repo/x.md\n<｜tool▁call▁end｜>`;
+      const { toolCalls } = extractDeepSeekResponse(thinking);
+      expect(toolCalls[0]).toEqual({ tool: "Read", args: { file_path: "/repo/x.md" } });
+    }
+  });
+
   it("maps DeepSeek WebSearch with search_term to WebSearch.query", () => {
     const thinking = [
       "</think>",
