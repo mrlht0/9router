@@ -40,6 +40,7 @@ const CURSOR_STREAM_DEBUG = process.env.CURSOR_STREAM_DEBUG === "1";
 const debugLog = (...args) => {
   if (CURSOR_STREAM_DEBUG) console.log(...args);
 };
+const requestDebugLog = (...args) => console.log(...args);
 
 function decompressPayload(payload, flags) {
   // Check if payload is JSON error (starts with {"error")
@@ -135,7 +136,35 @@ export class CursorExecutor extends BaseExecutor {
     // Detect Claude Code UA to force Agent mode (issue #643)
     const ua = credentials?.rawHeaders?.["user-agent"] || "";
     const forceAgentMode = ua.includes("claude-cli") || ua.includes("claude-code") || ua.includes("Claude Code");
-    return generateCursorBody(messages, model, tools, reasoningEffort, forceAgentMode);
+    const cursorMode = typeof body.cursor_mode === "string" ? body.cursor_mode.toLowerCase() : null;
+    const toolChoice = body.tool_choice || null;
+    const totalTools = Array.isArray(tools) ? tools.length : 0;
+    const toolNames = (tools || [])
+      .map(t => t?.function?.name || t?.name || "")
+      .filter(Boolean);
+    const prefixedMcpToolNames = toolNames.filter(name => name.startsWith("mcp__"));
+    const builtinOrCustomToolNames = toolNames.filter(name => !name.startsWith("mcp__"));
+    const toolChoiceName =
+      typeof toolChoice === "string"
+        ? toolChoice
+        : (toolChoice?.function?.name || toolChoice?.name || "none");
+    requestDebugLog(
+      `[CURSOR REQUEST] model=${model} cursor_mode=${cursorMode || "auto"} forceAgentMode=${forceAgentMode} stream=${stream !== false} total_tools=${totalTools} prefixed_mcp_tools=${prefixedMcpToolNames.length} builtin_or_custom_tools=${builtinOrCustomToolNames.length} tool_choice=${toolChoiceName}`
+    );
+    if (prefixedMcpToolNames.length > 0) {
+      requestDebugLog(
+        `[CURSOR REQUEST] mcp sample: ${prefixedMcpToolNames.slice(0, 10).join(", ")}${prefixedMcpToolNames.length > 10 ? " ..." : ""}`
+      );
+    }
+    if (builtinOrCustomToolNames.length > 0) {
+      requestDebugLog(
+        `[CURSOR REQUEST] builtin/custom sample: ${builtinOrCustomToolNames.slice(0, 10).join(", ")}${builtinOrCustomToolNames.length > 10 ? " ..." : ""}`
+      );
+    }
+    if (toolNames.length === 0) {
+      requestDebugLog("[CURSOR REQUEST] no tools in request body");
+    }
+    return generateCursorBody(messages, model, tools, reasoningEffort, forceAgentMode, cursorMode, toolChoice);
   }
 
   async makeFetchRequest(url, headers, body, signal, proxyOptions = null) {
