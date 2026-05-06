@@ -4,7 +4,9 @@ import {
   stripCodeEditBlocks,
   parseCatNContent,
   findLatestReadResult,
-  resolveEditFromHistory
+  resolveEditFromHistory,
+  extractDeepSeekResponse,
+  parseDeepSeekToolCalls
 } from "../../open-sse/utils/cursorCodeEditTranslator.js";
 
 describe("cursor code-edit translator", () => {
@@ -134,5 +136,134 @@ describe("cursor code-edit translator", () => {
     const resolved = resolveEditFromHistory(messages, edit);
     expect(resolved.tool).toBe("Write");
     expect(resolved.args).toEqual({ file_path: "fresh.md", content: "# new file" });
+  });
+});
+
+describe("DeepSeek-embedded tool calls", () => {
+  it("extracts a single StrReplace and maps to Edit", () => {
+    const thinking = [
+      "Some chain-of-thought reasoning here.",
+      "</think>",
+      "Memperbarui judul di `test.md` menjadi `# HUHUHU`.",
+      "",
+      "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>",
+      "StrReplace",
+      "<｜tool▁sep｜>path",
+      "/repo/test.md",
+      "<｜tool▁sep｜>old_string",
+      "# wkwkwk",
+      "<｜tool▁sep｜>new_string",
+      "# HUHUHU",
+      "<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
+    ].join("\n");
+    const { cotText, assistantText, toolCalls } = extractDeepSeekResponse(thinking);
+    expect(cotText).toContain("chain-of-thought reasoning");
+    expect(assistantText).toContain("Memperbarui judul");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0].tool).toBe("Edit");
+    expect(toolCalls[0].args).toEqual({
+      file_path: "/repo/test.md",
+      old_string: "# wkwkwk",
+      new_string: "# HUHUHU"
+    });
+  });
+
+  it("maps DeepSeek View/Read variants to Read", () => {
+    const thinking = [
+      "</think>Reading…",
+      "<｜tool▁call▁begin｜>View<｜tool▁sep｜>path",
+      "/repo/x.md",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "Read",
+      args: { file_path: "/repo/x.md" }
+    });
+  });
+
+  it("maps Bash/RunCommand to Bash", () => {
+    const thinking = [
+      "</think>Running…",
+      "<｜tool▁call▁begin｜>RunCommand<｜tool▁sep｜>command",
+      "ls -la",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "Bash",
+      args: { command: "ls -la" }
+    });
+  });
+
+  it("returns empty for plain reasoning without tool tokens", () => {
+    const result = extractDeepSeekResponse("just thinking, no tools here");
+    expect(result.toolCalls).toHaveLength(0);
+  });
+
+  it("maps DeepSeek Glob with target_directory/glob_pattern to Claude Code Glob", () => {
+    const thinking = [
+      "</think>Searching…",
+      "<｜tool▁call▁begin｜>Glob<｜tool▁sep｜>target_directory",
+      "/repo",
+      "<｜tool▁sep｜>glob_pattern",
+      "**/test.md",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "Glob",
+      args: { pattern: "**/test.md", path: "/repo" }
+    });
+  });
+
+  it("maps ListDir to LS", () => {
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>ListDir<｜tool▁sep｜>target_directory",
+      "/repo/src",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({ tool: "LS", args: { path: "/repo/src" } });
+  });
+
+  it("maps GrepSearch to Grep", () => {
+    const thinking = [
+      "</think>",
+      "<｜tool▁call▁begin｜>GrepSearch<｜tool▁sep｜>pattern",
+      "TODO",
+      "<｜tool▁sep｜>path",
+      "/repo",
+      "<｜tool▁call▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "Grep",
+      args: { pattern: "TODO", path: "/repo" }
+    });
+  });
+
+  it("parses multiple tool calls in one block", () => {
+    const text = [
+      "<｜tool▁calls▁begin｜>",
+      "<｜tool▁call▁begin｜>View<｜tool▁sep｜>path",
+      "/a.md",
+      "<｜tool▁call▁end｜>",
+      "<｜tool▁call▁begin｜>StrReplace<｜tool▁sep｜>path",
+      "/a.md",
+      "<｜tool▁sep｜>old_string",
+      "old",
+      "<｜tool▁sep｜>new_string",
+      "new",
+      "<｜tool▁call▁end｜>",
+      "<｜tool▁calls▁end｜>"
+    ].join("\n");
+    const calls = parseDeepSeekToolCalls(text);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].name).toBe("View");
+    expect(calls[1].name).toBe("StrReplace");
+    expect(calls[1].params.old_string).toBe("old");
+    expect(calls[1].params.new_string).toBe("new");
   });
 });

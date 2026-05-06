@@ -128,6 +128,212 @@ export function findLatestReadResult(messages, filePath) {
   return null;
 }
 
+// === DeepSeek-style tool calls embedded in thinking text ===
+//
+// Cursor's `default` model resolves to a DeepSeek-style reasoner that emits
+// tool calls inside the protobuf THINKING field instead of as proper
+// ClientSideToolV2Call frames. The wire format uses these special tokens:
+//
+//   <｜tool▁calls▁begin｜>
+//   <｜tool▁call▁begin｜>
+//   ToolName
+//   <｜tool▁sep｜>paramName
+//   paramValue
+//   <｜tool▁sep｜>otherParam
+//   otherValue
+//   <｜tool▁call▁end｜>
+//   <｜tool▁calls▁end｜>
+//
+// We parse them here and re-map to Claude Code tool names so the synthesised
+// tool_use call lines up with what the client (Claude Code) knows how to run.
+
+const DEEPSEEK_TOKEN_CALLS_BEGIN = "<｜tool▁calls▁begin｜>";
+const DEEPSEEK_TOKEN_CALLS_END = "<｜tool▁calls▁end｜>";
+const DEEPSEEK_TOKEN_CALL_BEGIN = "<｜tool▁call▁begin｜>";
+const DEEPSEEK_TOKEN_CALL_END = "<｜tool▁call▁end｜>";
+const DEEPSEEK_TOKEN_SEP = "<｜tool▁sep｜>";
+
+function pickFirst(obj, keys) {
+  for (const k of keys) {
+    if (typeof obj?.[k] === "string" && obj[k].length > 0) return obj[k];
+  }
+  return "";
+}
+
+function mapDeepSeekToolToClaudeCode(name, params) {
+  const n = (name || "").trim();
+  // StrReplace ≡ Edit. DeepSeek uses `path`; Claude Code uses `file_path`.
+  if (n === "StrReplace" || n === "str_replace" || n === "Edit") {
+    return {
+      tool: "Edit",
+      args: {
+        file_path: pickFirst(params, ["file_path", "path", "target_file"]),
+        old_string: pickFirst(params, ["old_string", "old", "old_str"]),
+        new_string: pickFirst(params, ["new_string", "new", "new_str"])
+      }
+    };
+  }
+  if (n === "View" || n === "Read" || n === "ReadFile" || n === "read_file") {
+    return {
+      tool: "Read",
+      args: {
+        file_path: pickFirst(params, ["file_path", "path", "target_file"])
+      }
+    };
+  }
+  if (n === "Create" || n === "Write" || n === "WriteFile" || n === "write_file") {
+    return {
+      tool: "Write",
+      args: {
+        file_path: pickFirst(params, ["file_path", "path", "target_file"]),
+        content: pickFirst(params, ["content", "file_text", "text"])
+      }
+    };
+  }
+  if (n === "Bash" || n === "BashTool" || n === "RunCommand" || n === "run_terminal_command") {
+    const args = {
+      command: pickFirst(params, ["command", "cmd", "script"])
+    };
+    const description = pickFirst(params, ["description", "explanation"]);
+    if (description) args.description = description;
+    return { tool: "Bash", args };
+  }
+  if (n === "Glob" || n === "FileSearch" || n === "file_search") {
+    const args = {
+      pattern: pickFirst(params, ["pattern", "glob_pattern", "query"])
+    };
+    const dirPath = pickFirst(params, ["path", "target_directory", "directory", "cwd"]);
+    if (dirPath) args.path = dirPath;
+    return { tool: "Glob", args };
+  }
+  if (n === "LS" || n === "ListDir" || n === "list_dir" || n === "ListDirectory") {
+    return {
+      tool: "LS",
+      args: { path: pickFirst(params, ["path", "target_directory", "directory"]) }
+    };
+  }
+  if (n === "Grep" || n === "GrepSearch" || n === "grep_search" || n === "RipgrepSearch" || n === "Search") {
+    const args = {
+      pattern: pickFirst(params, ["pattern", "query", "regex"])
+    };
+    const grepPath = pickFirst(params, ["path", "target_directory", "directory"]);
+    if (grepPath) args.path = grepPath;
+    const glob = pickFirst(params, ["glob", "include", "include_pattern"]);
+    if (glob) args.glob = glob;
+    const outputMode = pickFirst(params, ["output_mode"]);
+    if (outputMode) args.output_mode = outputMode;
+    return { tool: "Grep", args };
+  }
+  if (n === "WebSearch") {
+    return { tool: "WebSearch", args: { query: pickFirst(params, ["query", "q", "search"]) } };
+  }
+  if (n === "WebFetch" || n === "WebViewer" || n === "web_viewer") {
+    return {
+      tool: "WebFetch",
+      args: {
+        url: pickFirst(params, ["url", "uri", "link"]),
+        prompt: pickFirst(params, ["prompt", "question"]) || "Fetch and summarize this page"
+      }
+    };
+  }
+  // Fallback: pass through using whatever the model emitted. Removes empty keys.
+  const cleaned = {};
+  for (const [k, v] of Object.entries(params || {})) {
+    if (typeof v === "string" && v.length > 0) cleaned[k] = v;
+  }
+  return { tool: n || "tool", args: cleaned };
+}
+
+function parseDeepSeekCallBody(body) {
+  // body is the text BETWEEN <｜tool▁call▁begin｜> and <｜tool▁call▁end｜>.
+  // Split on <｜tool▁sep｜>: first segment is "ToolName" (possibly with a
+  // leading "function" prefix); subsequent segments are "paramName\nvalue".
+  const segs = body.split(DEEPSEEK_TOKEN_SEP).map((s) => s.replace(/^[\s\n]+|[\s\n]+$/g, ""));
+  if (segs.length === 0) return null;
+
+  // First segment may include "function" prefix and tool name on next line.
+  const firstSeg = segs[0];
+  const firstLines = firstSeg.split("\n").map((l) => l.trim()).filter(Boolean);
+  const toolName =
+    firstLines.length > 1 && /^function$/i.test(firstLines[0])
+      ? firstLines.slice(1).join(" ")
+      : firstLines.join(" ");
+
+  const params = {};
+  for (let i = 1; i < segs.length; i++) {
+    const seg = segs[i];
+    const idx = seg.indexOf("\n");
+    if (idx === -1) {
+      // Whole segment is the param name with empty value
+      params[seg.trim()] = "";
+      continue;
+    }
+    const key = seg.slice(0, idx).trim();
+    const value = seg.slice(idx + 1);
+    if (key) params[key] = value;
+  }
+  return { name: toolName, params };
+}
+
+export function parseDeepSeekToolCalls(text) {
+  if (typeof text !== "string" || !text.includes(DEEPSEEK_TOKEN_CALL_BEGIN)) return [];
+  const calls = [];
+  // Calls may be wrapped in <｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜> or appear bare.
+  let cursor = 0;
+  while (cursor < text.length) {
+    const begin = text.indexOf(DEEPSEEK_TOKEN_CALL_BEGIN, cursor);
+    if (begin < 0) break;
+    const end = text.indexOf(DEEPSEEK_TOKEN_CALL_END, begin);
+    if (end < 0) break;
+    const body = text.slice(begin + DEEPSEEK_TOKEN_CALL_BEGIN.length, end);
+    const parsed = parseDeepSeekCallBody(body);
+    if (parsed) calls.push(parsed);
+    cursor = end + DEEPSEEK_TOKEN_CALL_END.length;
+  }
+  return calls;
+}
+
+// Extract chain-of-thought, preamble assistant text, and tool calls from a
+// DeepSeek-style thinking blob. Splits on:
+//   - `</think>` boundary (everything before = chain-of-thought)
+//   - `<｜tool▁calls▁begin｜>` / `<｜tool▁call▁begin｜>` (tool-call region)
+// Returns { cotText, assistantText, toolCalls }.
+export function extractDeepSeekResponse(thinkingText) {
+  if (typeof thinkingText !== "string" || thinkingText.length === 0) {
+    return { cotText: "", assistantText: "", toolCalls: [] };
+  }
+
+  const thinkEnd = thinkingText.lastIndexOf("</think>");
+  const cotText = thinkEnd >= 0 ? thinkingText.slice(0, thinkEnd) : "";
+  const afterThink =
+    thinkEnd >= 0 ? thinkingText.slice(thinkEnd + "</think>".length) : thinkingText;
+
+  const callsStart = afterThink.indexOf(DEEPSEEK_TOKEN_CALLS_BEGIN);
+  const fallbackStart = afterThink.indexOf(DEEPSEEK_TOKEN_CALL_BEGIN);
+  const cutoff =
+    callsStart >= 0
+      ? callsStart
+      : fallbackStart >= 0
+      ? fallbackStart
+      : -1;
+
+  const assistantText = (cutoff >= 0 ? afterThink.slice(0, cutoff) : afterThink).trim();
+
+  const callsRegion =
+    cutoff >= 0
+      ? (() => {
+          const endIdx = afterThink.indexOf(DEEPSEEK_TOKEN_CALLS_END, cutoff);
+          return endIdx >= 0
+            ? afterThink.slice(cutoff, endIdx)
+            : afterThink.slice(cutoff);
+        })()
+      : "";
+
+  const rawCalls = parseDeepSeekToolCalls(callsRegion);
+  const toolCalls = rawCalls.map((c) => mapDeepSeekToolToClaudeCode(c.name, c.params));
+  return { cotText, assistantText, toolCalls };
+}
+
 // Build a tool call that semantically applies the given code-edit block.
 // Prefers Edit (exact old_string/new_string) when we can recover the original
 // lines from a prior Read; otherwise falls back to Write (full overwrite).

@@ -1257,7 +1257,7 @@ export function extractTextFromResponse(payload) {
     if (fields.has(FIELD.TOOL_CALL)) {
       const toolCall = extractToolCall(fields.get(FIELD.TOOL_CALL)[0].value);
       if (toolCall) {
-        console.log(`[CURSOR PROTO DECODE] toolCall detected: name=${toolCall.function.name} id=${toolCall.id}`);
+        if (DEBUG) log("DECODE", `toolCall detected: name=${toolCall.function.name} id=${toolCall.id}`);
         log("EXTRACT", `Tool call: ${toolCall.function.name}`);
         return { text: null, error: null, toolCall, thinking: null };
       }
@@ -1266,9 +1266,10 @@ export function extractTextFromResponse(payload) {
     // Field 2: StreamUnifiedChatResponse
     if (fields.has(FIELD.RESPONSE)) {
       const { text, thinking } = extractTextAndThinking(fields.get(FIELD.RESPONSE)[0].value);
-      if (text || thinking) {
-        console.log(
-          `[CURSOR PROTO DECODE] text_chunk=${text ? text.length : 0} thinking_chunk=${thinking ? thinking.length : 0}`
+      if ((text || thinking) && DEBUG) {
+        log(
+          "DECODE",
+          `text_chunk=${text ? text.length : 0} thinking_chunk=${thinking ? thinking.length : 0}`
         );
       }
 

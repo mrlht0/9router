@@ -13,7 +13,8 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import {
   parseCodeEditBlocks,
   stripCodeEditBlocks,
-  resolveEditFromHistory
+  resolveEditFromHistory,
+  extractDeepSeekResponse
 } from "../utils/cursorCodeEditTranslator.js";
 import { randomUUID } from "node:crypto";
 import zlib from "zlib";
@@ -471,6 +472,30 @@ export class CursorExecutor extends BaseExecutor {
 
     debugLog(`[CURSOR BUFFER] Final toolCalls count: ${toolCalls.length}`);
 
+    // DeepSeek-embedded tool calls (see SSE path for context).
+    if (
+      toolCalls.length === 0 &&
+      totalContent.length === 0 &&
+      totalThinking.includes("<｜tool▁call▁begin｜>")
+    ) {
+      const { cotText, assistantText, toolCalls: dsCalls } =
+        extractDeepSeekResponse(totalThinking);
+      if (dsCalls.length > 0) {
+        for (const c of dsCalls) {
+          toolCalls.push({
+            id: `toolu_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+            type: "function",
+            function: { name: c.tool, arguments: JSON.stringify(c.args) }
+          });
+        }
+        if (assistantText) totalContent = assistantText;
+        totalThinking = cotText;
+        console.log(
+          `[CURSOR DEEPSEEK REWRITE] (json) detected ${dsCalls.length} tool call(s) → ${toolCalls.map((tc) => tc.function.name).join(",")} (cot_len=${cotText.length}, assistant_len=${assistantText.length})`
+        );
+      }
+    }
+
     // Same code-edit → tool_use rewrite as the SSE path (see comments there).
     if (toolCalls.length === 0 && totalContent) {
       const edits = parseCodeEditBlocks(totalContent);
@@ -761,6 +786,97 @@ export class CursorExecutor extends BaseExecutor {
     debugLog(
       `[CURSOR BUFFER SSE] Parsed ${frameCount} frames, toolCallsMap size: ${toolCallsMap.size}, toolCalls array: ${toolCalls.length}, thinking_len=${totalThinking.length}, text_len=${totalContent.length}`
     );
+
+    // === Rewrite DeepSeek-style tool calls embedded in thinking field → tool_use ===
+    // Cursor's `default` model resolves to a DeepSeek reasoner that emits the entire
+    // response (chain-of-thought + assistant text + tool calls) inside the THINKING
+    // protobuf field, using <｜tool▁call▁begin｜>...<｜tool▁call▁end｜> tokens. We
+    // split it apart and re-emit as proper SSE chunks so Claude Code sees a normal
+    // tool_use call.
+    if (
+      toolCalls.length === 0 &&
+      totalContent.length === 0 &&
+      totalThinking.includes("<｜tool▁call▁begin｜>")
+    ) {
+      const { cotText, assistantText, toolCalls: dsCalls } =
+        extractDeepSeekResponse(totalThinking);
+      if (dsCalls.length > 0) {
+        const synthesised = dsCalls.map((c) => ({
+          id: `toolu_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+          type: "function",
+          function: { name: c.tool, arguments: JSON.stringify(c.args) }
+        }));
+        console.log(
+          `[CURSOR DEEPSEEK REWRITE] detected ${dsCalls.length} tool call(s) → ${synthesised.map((tc) => tc.function.name).join(",")} (cot_len=${cotText.length}, assistant_len=${assistantText.length})`
+        );
+
+        const rebuilt = [];
+        // Initial role marker
+        rebuilt.push(
+          `data: ${JSON.stringify({
+            id: responseId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }]
+          })}\n\n`
+        );
+        // Chain-of-thought as reasoning_content (preserves "thinking..." UX without
+        // duplicating the assistant-visible text)
+        if (cotText) {
+          rebuilt.push(
+            `data: ${JSON.stringify({
+              id: responseId,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [{ index: 0, delta: { reasoning_content: cotText }, finish_reason: null }]
+            })}\n\n`
+          );
+        }
+        if (assistantText) {
+          rebuilt.push(
+            `data: ${JSON.stringify({
+              id: responseId,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [{ index: 0, delta: { content: assistantText }, finish_reason: null }]
+            })}\n\n`
+          );
+          totalContent = assistantText;
+        }
+        for (let i = 0; i < synthesised.length; i++) {
+          const tc = synthesised[i];
+          rebuilt.push(
+            `data: ${JSON.stringify({
+              id: responseId,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [{
+                index: 0,
+                delta: {
+                  tool_calls: [{
+                    index: i,
+                    id: tc.id,
+                    type: "function",
+                    function: { name: tc.function.name, arguments: tc.function.arguments }
+                  }]
+                },
+                finish_reason: null
+              }]
+            })}\n\n`
+          );
+          toolCalls.push({ ...tc, index: i });
+        }
+
+        chunks.length = 0;
+        chunks.push(...rebuilt);
+        // Clear thinking — we already represented it via reasoning_content above
+        totalThinking = "";
+      }
+    }
 
     // === Rewrite Cursor's `\`\`\`N:M:filename` code-edit blocks → Edit/Write tool_use ===
     // Cursor's hosted models emit file modifications as markdown blocks for the IDE's
