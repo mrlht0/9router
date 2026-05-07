@@ -1105,6 +1105,7 @@ docker stop 9router && docker rm 9router
 | `ENABLE_REQUEST_LOGS` | `false` | Enables request/response logs under `logs/` |
 | `AUTH_COOKIE_SECURE` | `false` | Force `Secure` auth cookie (set `true` behind HTTPS reverse proxy) |
 | `REQUIRE_API_KEY` | `false` | Enforce Bearer API key on `/v1/*` routes (recommended for internet-exposed deploys) |
+| `ALLOW_UNAUTHENTICATED_REMOTE_MANAGEMENT_API` | `false` | Allow management APIs without login from non-localhost hosts when dashboard login is disabled (**not recommended**) |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` | empty | Optional outbound proxy for upstream provider calls |
 
 Notes:

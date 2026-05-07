@@ -5,14 +5,15 @@
  * - Old: sk-{random8}
  */
 
-const API_KEY_SECRET = "endpoint-proxy-api-key-secret";
+const DEFAULT_API_KEY_SECRET = "endpoint-proxy-api-key-secret";
 
 /**
  * Generate CRC (8-char HMAC) using Web Crypto API
  */
-async function generateCrc(machineId, keyId) {
+async function generateCrc(machineId, keyId, env) {
   const encoder = new TextEncoder();
-  const keyData = encoder.encode(API_KEY_SECRET);
+  const apiKeySecret = env?.API_KEY_SECRET || DEFAULT_API_KEY_SECRET;
+  const keyData = encoder.encode(apiKeySecret);
   const data = encoder.encode(machineId + keyId);
   
   const key = await crypto.subtle.importKey(
@@ -35,7 +36,7 @@ async function generateCrc(machineId, keyId) {
  * @param {string} apiKey
  * @returns {Promise<{ machineId: string, keyId: string, isNewFormat: boolean } | null>}
  */
-export async function parseApiKey(apiKey) {
+export async function parseApiKey(apiKey, env) {
   if (!apiKey || !apiKey.startsWith("sk-")) return null;
 
   const parts = apiKey.split("-");
@@ -45,7 +46,7 @@ export async function parseApiKey(apiKey) {
     const [, machineId, keyId, crc] = parts;
     
     // Verify CRC
-    const expectedCrc = await generateCrc(machineId, keyId);
+    const expectedCrc = await generateCrc(machineId, keyId, env);
     if (crc !== expectedCrc) return null;
     
     return { machineId, keyId, isNewFormat: true };
@@ -69,4 +70,3 @@ export function extractBearerToken(request) {
   if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
   return authHeader.slice(7);
 }
-

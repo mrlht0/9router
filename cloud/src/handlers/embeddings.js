@@ -46,7 +46,7 @@ export async function handleEmbeddings(request, env, ctx, machineIdOverride = nu
     const apiKey = extractBearerToken(request);
     if (!apiKey) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
 
-    const parsed = await parseApiKey(apiKey);
+    const parsed = await parseApiKey(apiKey, env);
     if (!parsed) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key format");
 
     if (!parsed.isNewFormat || !parsed.machineId) {

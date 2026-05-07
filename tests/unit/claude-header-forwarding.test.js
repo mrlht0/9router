@@ -323,8 +323,13 @@ describe("DefaultExecutor.buildHeaders() — anthropic-compatible stripping", ()
 // ─── proxyFetch anthropicFetch routing ────────────────────────────────────────
 
 describe("proxyAwareFetch — api.anthropic.com routing", () => {
+  beforeEach(() => {
+    globalThis.__9ROUTER_RUNTIME_IMPORT__ = (specifier) => import(specifier);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+    delete globalThis.__9ROUTER_RUNTIME_IMPORT__;
   });
 
   it("routes api.anthropic.com to gotScraping (non-streaming) and returns ok response", async () => {

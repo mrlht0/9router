@@ -1,8 +1,12 @@
 import { connect } from "cloudflare:sockets";
+import { maskForwardHeaders, requireForwardAuth } from "./forwardAuth.js";
 
 // Forward request via raw TCP socket (bypasses CF auto headers)
-export async function handleForwardRaw(request) {
+export async function handleForwardRaw(request, env) {
   try {
+    const authError = requireForwardAuth(request, env);
+    if (authError) return authError;
+
     const { targetUrl, headers = {}, body } = await request.json();
     
     if (!targetUrl) {
@@ -12,7 +16,22 @@ export async function handleForwardRaw(request) {
       });
     }
 
-    const url = new URL(targetUrl);
+    let url;
+    try {
+      url = new URL(targetUrl);
+    } catch {
+      return new Response(JSON.stringify({ error: "targetUrl is invalid" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return new Response(JSON.stringify({ error: "targetUrl must use http or https" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
     const host = url.hostname;
     const port = url.port || (url.protocol === "https:" ? 443 : 80);
     const path = url.pathname + url.search;
@@ -20,38 +39,26 @@ export async function handleForwardRaw(request) {
 
     console.log("[FORWARD_RAW] Connecting to:", host, port, isHttps ? "(TLS)" : "");
 
-    // Connect to target server
     let secureSocket;
     if (isHttps) {
-      // For HTTPS, connect directly with TLS enabled
-      console.log("[FORWARD_RAW] Creating TLS socket...");
       secureSocket = connect({ 
         hostname: host, 
         port: parseInt(port),
         secureTransport: "on"
       });
-      console.log("[FORWARD_RAW] TLS socket created");
     } else {
       secureSocket = connect({ hostname: host, port: parseInt(port) });
     }
 
-    console.log("[FORWARD_RAW] Socket object:", secureSocket);
-    console.log("[FORWARD_RAW] Socket opened:", secureSocket.opened);
-    
-    // Wait for socket to be ready
     try {
-      console.log("[FORWARD_RAW] Waiting for socket to open...");
       await secureSocket.opened;
-      console.log("[FORWARD_RAW] Socket opened successfully");
     } catch (openError) {
       console.error("[FORWARD_RAW] Socket open error:", openError.message);
       throw openError;
     }
 
-    console.log("[FORWARD_RAW] Getting writer and reader...");
     const writer = secureSocket.writable.getWriter();
     const reader = secureSocket.readable.getReader();
-    console.log("[FORWARD_RAW] Writer and reader obtained");
 
     // Build raw HTTP request
     const bodyStr = JSON.stringify(body);
@@ -70,31 +77,25 @@ export async function handleForwardRaw(request) {
     }
     httpRequest += `\r\n${bodyStr}`;
 
-    console.log("[FORWARD_RAW] Sending request:", httpRequest.substring(0, 300));
+    console.log("[FORWARD_RAW] Request headers:", JSON.stringify(maskForwardHeaders(requestHeaders)));
     console.log("[FORWARD_RAW] Full request length:", httpRequest.length);
 
     // Send request
     try {
-      console.log("[FORWARD_RAW] Writing to socket...");
       await writer.write(new TextEncoder().encode(httpRequest));
-      console.log("[FORWARD_RAW] Write complete, closing writer...");
       await writer.close();
-      console.log("[FORWARD_RAW] Writer closed");
     } catch (writeError) {
       console.error("[FORWARD_RAW] Write error:", writeError.message);
       throw writeError;
     }
 
     // Read response with timeout
-    console.log("[FORWARD_RAW] Starting to read response...");
     let responseData = new Uint8Array(0);
     let attempts = 0;
     const maxAttempts = 100; // 10 seconds max
     
     while (attempts < maxAttempts) {
-      console.log("[FORWARD_RAW] Reading attempt:", attempts);
       const { done, value } = await reader.read();
-      console.log("[FORWARD_RAW] Read result - done:", done, "value length:", value?.length);
       if (done) break;
       if (value) {
         const newData = new Uint8Array(responseData.length + value.length);
@@ -113,7 +114,6 @@ export async function handleForwardRaw(request) {
             const expectedLength = parseInt(contentLengthMatch[1]);
             const bodyReceived = text.length - headerEnd - 4;
             if (bodyReceived >= expectedLength) {
-              console.log("[FORWARD_RAW] Complete response received");
               break;
             }
           }
@@ -125,12 +125,10 @@ export async function handleForwardRaw(request) {
     console.log("[FORWARD_RAW] Read loop finished, total bytes:", responseData.length);
 
     const responseText = new TextDecoder().decode(responseData);
-    console.log("[FORWARD_RAW] Response received:", responseText.substring(0, 500));
 
     // Parse HTTP response
     const headerEndIndex = responseText.indexOf("\r\n\r\n");
     if (headerEndIndex === -1) {
-      console.log("[FORWARD_RAW] Full response data:", responseText);
       throw new Error("Invalid HTTP response - no header end found");
     }
 
@@ -141,6 +139,7 @@ export async function handleForwardRaw(request) {
     const statusLine = headerPart.split("\r\n")[0];
     const statusMatch = statusLine.match(/HTTP\/[\d.]+ (\d+)/);
     const status = statusMatch ? parseInt(statusMatch[1]) : 200;
+    console.log("[FORWARD_RAW] Response status:", status, "bytes:", bodyPart.length);
 
     // Parse headers
     const responseHeaders = {};
@@ -170,4 +169,3 @@ export async function handleForwardRaw(request) {
     });
   }
 }
-

@@ -18,6 +18,16 @@ const GOOGLE_DNS_SERVERS = ["8.8.8.8", "8.8.4.4"];
 const HTTPS_PORT = 443;
 const HTTP_SUCCESS_MIN = 200;
 const HTTP_SUCCESS_MAX = 300;
+const RUNTIME_IMPORT = globalThis.__9ROUTER_RUNTIME_IMPORT__ ||
+  Function("specifier", "return import(specifier)");
+const RUNTIME_IMPORT_ALLOWLIST = new Set(["undici", "got-scraping"]);
+
+function importRuntimePackage(specifier) {
+  if (!RUNTIME_IMPORT_ALLOWLIST.has(specifier)) {
+    throw new Error(`Runtime import denied: ${specifier}`);
+  }
+  return RUNTIME_IMPORT(specifier);
+}
 
 function normalizeString(value) {
   if (value === undefined || value === null) return "";
@@ -132,7 +142,7 @@ async function getDispatcher(proxyUrl) {
     if (proxyDispatchers.size >= MEMORY_CONFIG.proxyDispatchersMaxSize) {
       proxyDispatchers.delete(proxyDispatchers.keys().next().value);
     }
-    const { ProxyAgent } = await import("undici");
+    const { ProxyAgent } = await importRuntimePackage("undici");
     proxyDispatchers.set(normalized, new ProxyAgent({ uri: normalized }));
   }
 
@@ -193,6 +203,33 @@ async function createBypassRequest(parsedUrl, realIP, options) {
   });
 }
 
+function shouldUseAnthropicFetch(targetUrl, options) {
+  let parsed;
+  try { parsed = new URL(targetUrl); } catch { return false; }
+  if (parsed.hostname !== "api.anthropic.com") return false;
+
+  const headers = new Headers(options.headers || {});
+  const accept = headers.get("accept") || "";
+  return !accept.toLowerCase().includes("text/event-stream");
+}
+
+async function fetchWithGotScraping(targetUrl, options) {
+  const { gotScraping } = await importRuntimePackage("got-scraping");
+  const response = await gotScraping({
+    url: targetUrl,
+    method: options.method || "GET",
+    headers: options.headers,
+    body: options.body,
+    throwHttpErrors: false,
+  });
+
+  return new Response(response.rawBody ?? response.body ?? "", {
+    status: response.statusCode,
+    statusText: response.statusMessage,
+    headers: response.headers,
+  });
+}
+
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   const targetUrl = typeof url === "string" ? url : url.toString();
 
@@ -211,6 +248,14 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);
   const envProxyUrl = connectionProxyUrl ? null : normalizeProxyUrl(getEnvProxyUrl(targetUrl));
   const proxyUrl = connectionProxyUrl || envProxyUrl;
+
+  if (!proxyUrl && shouldUseAnthropicFetch(targetUrl, options)) {
+    try {
+      return await fetchWithGotScraping(targetUrl, options);
+    } catch (error) {
+      console.warn(`[ProxyFetch] Anthropic got-scraping path failed, falling back to fetch: ${error.message}`);
+    }
+  }
 
   // MITM DNS bypass: for known MITM-intercepted hosts, resolve real IP to avoid DNS spoof
   if (shouldBypassMitmDns(targetUrl)) {
