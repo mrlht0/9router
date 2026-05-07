@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCombos, createCombo, getComboByName } from "@/lib/localDb";
+import { validateComboReferences } from "@/lib/comboValidation";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,12 @@ export async function POST(request) {
     const existing = await getComboByName(name);
     if (existing) {
       return NextResponse.json({ error: "Combo name already exists" }, { status: 400 });
+    }
+
+    const combos = await getCombos();
+    const validation = validateComboReferences({ name, models: models || [], combos });
+    if (!validation.valid) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
     }
 
     const combo = await createCombo({ name, models: models || [], kind: kind || null });
