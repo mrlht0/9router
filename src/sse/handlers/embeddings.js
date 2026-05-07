@@ -6,6 +6,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
+import { trackDevice } from "@/lib/deviceTracker.js";
 import { getModelInfo } from "../services/model.js";
 import { handleEmbeddingsCore } from "open-sse/handlers/embeddingsCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -43,17 +44,21 @@ export async function handleEmbeddings(request) {
 
   // Enforce API key if enabled in settings
   const settings = await getSettings();
+  let validApiKeyForTracking = false;
   if (settings.requireApiKey) {
     if (!apiKey) {
       log.warn("AUTH", "Missing API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
     }
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) {
+    validApiKeyForTracking = await isValidApiKey(apiKey);
+    if (!validApiKeyForTracking) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
     }
+  } else if (apiKey) {
+    validApiKeyForTracking = await isValidApiKey(apiKey);
   }
+  if (validApiKeyForTracking) trackDevice(apiKey, request);
 
   if (!modelStr) {
     log.warn("EMBEDDINGS", "Missing model");
