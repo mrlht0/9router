@@ -201,6 +201,16 @@ export const PROVIDER_MODELS = {
     { id: "google/gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite Preview" },
     { id: "kwaipilot/kat-coder-pro", name: "KAT Coder Pro" },
   ],
+  cb: [  // CodeBuddy
+    { id: "default", name: "Default" },
+    { id: "lite", name: "Lite" },
+    { id: "reasoning", name: "Reasoning" },
+    { id: "gpt-5", name: "GPT-5" },
+    { id: "gpt-4", name: "GPT-4" },
+    { id: "claude-sonnet-4", name: "Claude Sonnet 4" },
+    { id: "deepseek-v3.1", name: "DeepSeek V3.1" },
+    { id: "glm-4.7", name: "GLM 4.7" },
+  ],
 
   // API Key Providers (alias = id)
   openai: [
@@ -695,6 +705,7 @@ const OAUTH_ALIASES = {
   "kimi-coding": "kmc",
   kilocode: "kc",
   cline: "cl",
+  codebuddy: "cb",
   opencode: "oc",
   vertex: "vertex",
   "vertex-partner": "vertex-partner",
