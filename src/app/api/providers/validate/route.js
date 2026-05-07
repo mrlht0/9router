@@ -347,6 +347,7 @@ export async function POST(request) {
         }
 
         case "deepseek":
+        case "qiniu":
         case "groq":
         case "xai":
         case "mistral":
@@ -367,6 +368,7 @@ export async function POST(request) {
         case "nvidia": {
           const endpoints = {
             deepseek: "https://api.deepseek.com/models",
+            qiniu: "https://api.qnaigc.com/v1/models",
             groq: "https://api.groq.com/openai/v1/models",
             xai: "https://api.x.ai/v1/models",
             mistral: "https://api.mistral.ai/v1/models",
