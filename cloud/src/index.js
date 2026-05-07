@@ -9,7 +9,6 @@ import { handleCacheClear } from "./handlers/cache.js";
 import { handleSync } from "./handlers/sync.js";
 import { handleChat } from "./handlers/chat.js";
 import { handleVerify } from "./handlers/verify.js";
-import { handleTestClaude } from "./handlers/testClaude.js";
 import { handleForward } from "./handlers/forward.js";
 import { handleForwardRaw } from "./handlers/forwardRaw.js";
 import { handleEmbeddings } from "./handlers/embeddings.js";
@@ -192,23 +191,16 @@ const worker = {
         return response;
       }
 
-      // Test Claude - forward to Anthropic API
-      if (path === "/testClaude" && request.method === "POST") {
-        const response = await handleTestClaude(request);
-        log.response(response.status, Date.now() - startTime);
-        return response;
-      }
-
       // Forward request to any endpoint
       if (path === "/forward" && request.method === "POST") {
-        const response = await handleForward(request);
+        const response = await handleForward(request, env);
         log.response(response.status, Date.now() - startTime);
         return response;
       }
 
       // Forward request via raw TCP socket (bypasses CF auto headers)
       if (path === "/forward-raw" && request.method === "POST") {
-        const response = await handleForwardRaw(request);
+        const response = await handleForwardRaw(request, env);
         log.response(response.status, Date.now() - startTime);
         return response;
       }
@@ -230,4 +222,3 @@ const worker = {
 };
 
 export default worker;
-

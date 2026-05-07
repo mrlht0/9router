@@ -4,7 +4,7 @@ import { sleep, nowSec, sizeToAspectRatio, POLL_INTERVAL_MS, POLL_TIMEOUT_MS } f
 const SUBMIT_URL = "https://api.nanobananaapi.ai/api/v1/nanobanana/generate";
 const POLL_BASE = "https://api.nanobananaapi.ai/api/v1/nanobanana/record-info";
 
-export default {
+const nanoBananaAdapter = {
   async: true,
   buildUrl: () => SUBMIT_URL,
   buildHeaders: (creds) => {
@@ -34,6 +34,7 @@ export default {
   // Async: parse submit → poll until SUCCESS, return raw poll data
   async parseResponse(response, { headers }) {
     const submitData = await response.json();
+    if (submitData.image) return submitData;
     if (submitData.code !== 200) throw new Error(submitData.msg || "NanoBanana submit failed");
     const taskId = submitData.data?.taskId;
     if (!taskId) throw new Error("NanoBanana: no taskId returned");
@@ -51,8 +52,13 @@ export default {
     throw new Error("NanoBanana polling timeout");
   },
   normalize: (responseBody, prompt) => {
+    if (responseBody.image) {
+      return { created: nowSec(), data: [{ b64_json: responseBody.image, revised_prompt: prompt }] };
+    }
     const url = responseBody.response?.resultImageUrl || responseBody.response?.originImageUrl;
     if (url) return { created: nowSec(), data: [{ url, revised_prompt: prompt }] };
     return { created: nowSec(), data: [] };
   },
 };
+
+export default nanoBananaAdapter;

@@ -4,8 +4,18 @@ import { RAW_CAP, MIN_COMPRESS_SIZE } from "./constants.js";
 import { autoDetectFilter } from "./autodetect.js";
 import { safeApply } from "./applyFilter.js";
 
+let defaultRtkEnabled = false;
+
+export function setRtkEnabled(enabled) {
+  defaultRtkEnabled = enabled === true;
+}
+
+export function isRtkEnabled() {
+  return defaultRtkEnabled;
+}
+
 // Compress tool_result content in-place. Returns stats or null if disabled/failed.
-export function compressMessages(body, enabled) {
+export function compressMessages(body, enabled = defaultRtkEnabled) {
   if (!enabled) return null;
   if (!body) return null;
   // Support both OpenAI/Claude "messages" and OpenAI Responses "input"

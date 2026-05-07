@@ -17,7 +17,7 @@ export async function handleVerify(request, env, machineIdOverride = null) {
   let machineId = machineIdOverride;
   
   if (!machineId) {
-    const parsed = await parseApiKey(apiKey);
+    const parsed = await parseApiKey(apiKey, env);
     if (!parsed) {
       return jsonResponse({ error: "Invalid API key format" }, 401);
     }
@@ -57,4 +57,3 @@ function jsonResponse(data, status = 200) {
     }
   });
 }
-

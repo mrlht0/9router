@@ -9,6 +9,21 @@ import { DATA_DIR } from "@/lib/dataDir.js";
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DB_FILE = path.join(DATA_DIR, "db.json");
 
+function envFlag(name, fallback = false) {
+  const value = process.env[name];
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return fallback;
+}
+
+function applySettingsEnvOverrides(settings = {}) {
+  const next = { ...settings };
+  if (process.env.REQUIRE_API_KEY === "true") {
+    next.requireApiKey = true;
+  }
+  return next;
+}
+
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -27,6 +42,7 @@ const DEFAULT_SETTINGS = {
   comboStrategies: {},
   requireLogin: true,
   tunnelDashboardAccess: true,
+  requireApiKey: envFlag("REQUIRE_API_KEY", false),
   observabilityEnabled: true,
   observabilityMaxRecords: 1000,
   observabilityBatchSize: 20,
@@ -707,14 +723,14 @@ export async function cleanupProviderConnections() {
 
 export async function getSettings() {
   const db = await getDb();
-  return db.data.settings || { cloudEnabled: false };
+  return applySettingsEnvOverrides(db.data.settings || { cloudEnabled: false });
 }
 
 export async function updateSettings(updates) {
   const db = await getDb();
   db.data.settings = { ...db.data.settings, ...updates };
   await safeWrite(db);
-  return db.data.settings;
+  return applySettingsEnvOverrides(db.data.settings);
 }
 
 export async function exportDb() {

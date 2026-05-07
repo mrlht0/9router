@@ -14,7 +14,7 @@ export async function handleCacheClear(request, env) {
     // Get machineId from API key or body
     let machineId = body.machineId;
     if (!machineId) {
-      const parsed = await parseApiKey(apiKey);
+      const parsed = await parseApiKey(apiKey, env);
       machineId = parsed?.machineId;
     }
 

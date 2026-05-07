@@ -28,12 +28,23 @@ const ALWAYS_PROTECTED = [
   "/api/settings/database",
 ];
 
-// Require auth, but allow through if requireLogin is disabled
+// Require auth for management APIs; localhost can opt out with requireLogin=false.
 const PROTECTED_API_PATHS = [
+  "/api/cli-tools",
+  "/api/combos",
+  "/api/models",
+  "/api/oauth",
+  "/api/pricing",
+  "/api/provider-nodes",
+  "/api/providers",
+  "/api/proxy-pools",
   "/api/settings",
+  "/api/tags",
+  "/api/translator",
+  "/api/tunnel",
+  "/api/usage",
+  "/api/version/update",
   "/api/keys",
-  "/api/providers/client",
-  "/api/provider-nodes/validate",
 ];
 
 async function hasValidToken(request) {
@@ -56,10 +67,34 @@ async function loadSettings() {
   }
 }
 
+function isLocalHostname(hostname) {
+  const value = (hostname || "").toLowerCase();
+  return (
+    value === "localhost" ||
+    value === "127.0.0.1" ||
+    value === "::1" ||
+    value.endsWith(".localhost")
+  );
+}
+
+function isLocalRequest(request) {
+  const nextHostname = request.nextUrl?.hostname;
+  if (isLocalHostname(nextHostname)) return true;
+
+  const host = (request.headers.get("host") || "").split(":")[0];
+  return isLocalHostname(host);
+}
+
+function allowsUnauthenticatedManagementApi(request, settings) {
+  if (settings?.requireLogin !== false) return false;
+  if (process.env.ALLOW_UNAUTHENTICATED_REMOTE_MANAGEMENT_API === "true") return true;
+  return isLocalRequest(request);
+}
+
 async function isAuthenticated(request) {
   if (await hasValidToken(request)) return true;
   const settings = await loadSettings();
-  if (settings && settings.requireLogin === false) return true;
+  if (settings && allowsUnauthenticatedManagementApi(request, settings)) return true;
   return false;
 }
 
@@ -73,7 +108,8 @@ export async function proxy(request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Protect sensitive API endpoints (allow CLI token, JWT, or requireLogin=false)
+  // Protect sensitive API endpoints. requireLogin=false only opens these on localhost
+  // unless ALLOW_UNAUTHENTICATED_REMOTE_MANAGEMENT_API is explicitly set.
   if (PROTECTED_API_PATHS.some((p) => pathname.startsWith(p))) {
     if (pathname === "/api/settings/require-login") return NextResponse.next();
     if (await hasValidCliToken(request) || await isAuthenticated(request))

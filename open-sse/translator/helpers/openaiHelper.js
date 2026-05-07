@@ -42,12 +42,8 @@ export function filterToOpenAIFormat(body) {
         }
       }
       
-      // If all content was filtered, add empty text
-      if (filteredContent.length === 0) {
-        filteredContent.push({ type: "text", text: "" });
-      }
-      
-      return { ...msg, content: filteredContent };
+      const nextContent = normalizeOpenAIContentBlocks(filteredContent);
+      return { ...msg, content: nextContent };
     }
     
     return msg;
@@ -125,3 +121,10 @@ export function filterToOpenAIFormat(body) {
   return body;
 }
 
+function normalizeOpenAIContentBlocks(blocks) {
+  if (blocks.length === 0) return "";
+  if (blocks.every((block) => block.type === "text")) {
+    return blocks.map((block) => block.text || "").join("\n");
+  }
+  return blocks;
+}

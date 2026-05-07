@@ -1,3 +1,5 @@
+import { maskForwardHeaders, requireForwardAuth } from "./forwardAuth.js";
+
 // CF headers to remove
 const CF_HEADERS = [
   "cf-connecting-ip", "cf-connecting-ip6", "cf-ray", "cf-visitor",
@@ -6,14 +8,34 @@ const CF_HEADERS = [
 ];
 
 // Forward request to any endpoint
-export async function handleForward(request) {
+export async function handleForward(request, env) {
   try {
+    const authError = requireForwardAuth(request, env);
+    if (authError) return authError;
+
     const url = new URL(request.url);
     const clientIp = request.headers.get("CF-Connecting-IP") || "";
     const { targetUrl, headers = {}, body } = await request.json();
     
     if (!targetUrl) {
       return new Response(JSON.stringify({ error: "targetUrl is required" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    let target;
+    try {
+      target = new URL(targetUrl);
+    } catch {
+      return new Response(JSON.stringify({ error: "targetUrl is invalid" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (!["http:", "https:"].includes(target.protocol)) {
+      return new Response(JSON.stringify({ error: "targetUrl must use http or https" }), {
         status: 400,
         headers: { "Content-Type": "application/json" }
       });
@@ -33,8 +55,8 @@ export async function handleForward(request) {
     cleanHeaders["X-Forwarded-Host"] = url.host;
     cleanHeaders["X-From-Worker"] = "1";
 
-    console.log("[FORWARD] Target:", targetUrl);
-    console.log("[FORWARD] Headers:", JSON.stringify(cleanHeaders));
+    console.log("[FORWARD] Target:", `${target.origin}${target.pathname}`);
+    console.log("[FORWARD] Headers:", JSON.stringify(maskForwardHeaders(cleanHeaders)));
 
     // Create Request object to have more control over headers
     const outgoingRequest = new Request(targetUrl, {
