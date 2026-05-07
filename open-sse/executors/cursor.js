@@ -23,7 +23,8 @@ import path from "node:path";
 
 // Opt-in: dump raw cursor request body + response buffer + decoded SSE to a directory.
 // Usage: CURSOR_DUMP_DIR=/tmp/cursor-dump bun run dev
-const CURSOR_DUMP_DIR = process.env.CURSOR_DUMP_DIR || null;
+// Disabled: hardcoded to null to prevent any temp dump writes.
+const CURSOR_DUMP_DIR = null;
 function dumpToDisk(name, data) {
   if (!CURSOR_DUMP_DIR) return;
   try {

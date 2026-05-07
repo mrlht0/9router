@@ -177,8 +177,14 @@ function mapDeepSeekToolToClaudeCode(name, params) {
       tool: "Edit",
       args: {
         file_path: pickFirst(params, ["file_path", "path", "target_file"]),
-        old_string: pickFirst(params, ["old_string", "old", "old_str"]),
-        new_string: pickFirst(params, ["new_string", "new", "new_str"])
+        old_string: pickFirst(params, [
+          "old_string", "old_strings", "old", "old_str", "old_text", "old_content",
+          "old_contents", "from", "search"
+        ]),
+        new_string: pickFirst(params, [
+          "new_string", "new_strings", "new", "new_str", "new_text", "new_content",
+          "new_contents", "to", "replace", "replacement"
+        ])
       }
     };
   }
@@ -217,7 +223,10 @@ function mapDeepSeekToolToClaudeCode(name, params) {
       tool: "Write",
       args: {
         file_path: pickFirst(params, ["file_path", "path", "target_file"]),
-        content: pickFirst(params, ["content", "file_text", "text"])
+        content: pickFirst(params, [
+          "content", "contents", "file_text", "file_content", "file_contents",
+          "text", "body", "source", "data"
+        ])
       }
     };
   }
