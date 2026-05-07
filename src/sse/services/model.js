@@ -37,6 +37,7 @@ export async function getModelInfo(modelStr) {
     if (matchedEmbedding) {
       return { provider: matchedEmbedding.id, model: parsed.model };
     }
+
     return {
       provider: parsed.provider,
       model: parsed.model

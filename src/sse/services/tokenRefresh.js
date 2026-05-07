@@ -145,6 +145,21 @@ function _refreshProjectId(provider, connectionId, accessToken) {
  * @param {object} newCredentials
  * @returns {Promise<boolean>}
  */
+const RUNTIME_PROXY_KEYS = new Set([
+  "connectionProxyPoolId",
+  "vercelRelayUrl",
+  "strictProxy",
+]);
+
+function stripRuntimeProxyFields(psd) {
+  if (!psd || typeof psd !== "object") return psd;
+  const cleaned = { ...psd };
+  for (const key of RUNTIME_PROXY_KEYS) {
+    delete cleaned[key];
+  }
+  return cleaned;
+}
+
 export async function updateProviderCredentials(connectionId, newCredentials) {
   try {
     const updates = {};
@@ -156,8 +171,9 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
       updates.expiresIn = newCredentials.expiresIn;
     }
     if (newCredentials.providerSpecificData) {
+      const existing = stripRuntimeProxyFields(newCredentials.existingProviderSpecificData || {});
       updates.providerSpecificData = {
-        ...(newCredentials.existingProviderSpecificData || {}),
+        ...existing,
         ...newCredentials.providerSpecificData,
       };
     }
@@ -209,7 +225,7 @@ export async function checkAndRefreshToken(provider, credentials) {
       if (newCreds?.accessToken) {
         const mergedCreds = {
           ...newCreds,
-          existingProviderSpecificData: creds.providerSpecificData,
+          existingProviderSpecificData: creds._connection?.providerSpecificData || creds.providerSpecificData,
         };
 
         // Persist to DB (non-blocking path continues below)
@@ -247,14 +263,16 @@ export async function checkAndRefreshToken(provider, credentials) {
 
       const copilotToken = await refreshCopilotToken(creds.accessToken);
       if (copilotToken) {
+        const originalSpecific = creds._connection?.providerSpecificData || creds.providerSpecificData;
         const updatedSpecific = {
-          ...creds.providerSpecificData,
+          ...originalSpecific,
           copilotToken:          copilotToken.token,
           copilotTokenExpiresAt: copilotToken.expiresAt,
         };
 
         await updateProviderCredentials(creds.connectionId, {
           providerSpecificData: updatedSpecific,
+          existingProviderSpecificData: originalSpecific,
         });
 
         creds.providerSpecificData = updatedSpecific;

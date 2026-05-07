@@ -5,6 +5,19 @@ import { KiroService } from "@/lib/oauth/services/kiro";
 import { GEMINI_CONFIG } from "@/lib/oauth/constants/oauth";
 import { refreshGoogleToken, updateProviderCredentials, refreshKiroToken } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
+import { proxyAwareFetch } from "open-sse/utils/proxyFetch.js";
+
+async function buildProxyOptions(connection) {
+  const resolved = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+  return {
+    connectionProxyEnabled: resolved.connectionProxyEnabled === true,
+    connectionProxyUrl: resolved.connectionProxyUrl || "",
+    connectionNoProxy: resolved.connectionNoProxy || "",
+    vercelRelayUrl: resolved.vercelRelayUrl || "",
+    strictProxy: resolved.strictProxy === true,
+  };
+}
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -220,13 +233,14 @@ export async function GET(request, { params }) {
         return NextResponse.json({ error: "No base URL configured for OpenAI compatible provider" }, { status: 400 });
       }
       const url = `${baseUrl.replace(/\/$/, "")}/models`;
-      const response = await fetch(url, {
+      const proxyOptions = await buildProxyOptions(connection);
+      const response = await proxyAwareFetch(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${connection.apiKey}`,
         },
-      });
+      }, proxyOptions);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -259,7 +273,8 @@ export async function GET(request, { params }) {
       }
 
       const url = `${baseUrl}/models`;
-      const response = await fetch(url, {
+      const proxyOptions = await buildProxyOptions(connection);
+      const response = await proxyAwareFetch(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -267,7 +282,7 @@ export async function GET(request, { params }) {
           "anthropic-version": "2023-06-01",
           "Authorization": `Bearer ${connection.apiKey}`
         },
-      });
+      }, proxyOptions);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -352,7 +367,8 @@ export async function GET(request, { params }) {
       const body = projectId ? { project: projectId } : {};
 
       const fetchModels = async (token) => {
-        const response = await fetch(GEMINI_CLI_MODELS_URL, {
+        const proxyOptions = await buildProxyOptions(connection);
+        const response = await proxyAwareFetch(GEMINI_CLI_MODELS_URL, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -361,7 +377,7 @@ export async function GET(request, { params }) {
             "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1"
           },
           body: JSON.stringify(body)
-        });
+        }, proxyOptions);
         return response;
       };
 
@@ -414,10 +430,11 @@ export async function GET(request, { params }) {
 
     if (connection.provider === "ollama-local") {
       const url = `${resolveOllamaLocalHost(connection)}/api/tags`;
-      const response = await fetch(url, {
+      const proxyOptions = await buildProxyOptions(connection);
+      const response = await proxyAwareFetch(url, {
         method: "GET",
         headers: { "Content-Type": "application/json" },
-      });
+      }, proxyOptions);
       if (!response.ok) {
         const errorText = await response.text();
         console.log(`Error fetching models from ollama-local:`, errorText);
@@ -474,7 +491,8 @@ export async function GET(request, { params }) {
       fetchOptions.body = JSON.stringify(config.body);
     }
 
-    const response = await fetch(url, fetchOptions);
+    const proxyOptions = await buildProxyOptions(connection);
+    const response = await proxyAwareFetch(url, fetchOptions, proxyOptions);
 
     if (!response.ok) {
       const errorText = await response.text();

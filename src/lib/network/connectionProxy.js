@@ -25,10 +25,8 @@ export async function resolveConnectionProxyConfig(providerSpecificData = {}) {
   if (proxyPoolId) {
     const proxyPool = await getProxyPoolById(proxyPoolId);
     const proxyUrl = normalizeString(proxyPool?.proxyUrl);
-    const noProxy = normalizeString(proxyPool?.noProxy);
 
     if (proxyPool && proxyPool.isActive === true && proxyUrl) {
-      // Vercel relay: rewrite base URL instead of using HTTP_PROXY
       if (proxyPool.type === "vercel") {
         return {
           source: "vercel",
@@ -36,7 +34,7 @@ export async function resolveConnectionProxyConfig(providerSpecificData = {}) {
           proxyPool,
           connectionProxyEnabled: false,
           connectionProxyUrl: "",
-          connectionNoProxy: noProxy,
+          connectionNoProxy: normalizeString(proxyPool?.noProxy),
           strictProxy: proxyPool.strictProxy === true,
           vercelRelayUrl: proxyUrl,
         };
@@ -48,7 +46,7 @@ export async function resolveConnectionProxyConfig(providerSpecificData = {}) {
         proxyPool,
         connectionProxyEnabled: true,
         connectionProxyUrl: proxyUrl,
-        connectionNoProxy: noProxy,
+        connectionNoProxy: normalizeString(proxyPool?.noProxy),
         strictProxy: proxyPool.strictProxy === true,
       };
     }

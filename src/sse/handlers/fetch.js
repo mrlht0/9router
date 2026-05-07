@@ -184,6 +184,7 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
           accessToken: newCreds.accessToken,
           refreshToken: newCreds.refreshToken,
           providerSpecificData: newCreds.providerSpecificData,
+          existingProviderSpecificData: credentials._connection?.providerSpecificData,
           testStatus: "active"
         });
       },
