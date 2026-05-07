@@ -244,6 +244,46 @@ describe("DeepSeek-embedded tool calls", () => {
     });
   });
 
+  it("maps DeepSeek Write with `contents` (plural) param to Write.content", () => {
+    const thinking = [
+      "</think>",
+      "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>",
+      "Write",
+      "<｜tool▁sep｜>path",
+      "/repo/test.md",
+      "<｜tool▁sep｜>contents",
+      "# Hello\n\nthis is the article body",
+      "<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
+    ].join("\n");
+    const { toolCalls } = extractDeepSeekResponse(thinking);
+    expect(toolCalls[0]).toEqual({
+      tool: "Write",
+      args: {
+        file_path: "/repo/test.md",
+        content: "# Hello\n\nthis is the article body"
+      }
+    });
+  });
+
+  it("recognises Write content under several alternative param names", () => {
+    for (const key of ["content", "contents", "file_text", "file_content", "file_contents", "text", "body", "source", "data"]) {
+      const thinking = `</think>\n<｜tool▁call▁begin｜>Write<｜tool▁sep｜>path\n/x.md\n<｜tool▁sep｜>${key}\nHELLO_${key}\n<｜tool▁call▁end｜>`;
+      const { toolCalls } = extractDeepSeekResponse(thinking);
+      expect(toolCalls[0].args.content).toBe(`HELLO_${key}`);
+    }
+  });
+
+  it("recognises Edit old/new under several alternative param names", () => {
+    for (const [oldKey, newKey] of [["old_string", "new_string"], ["old_contents", "new_contents"], ["from", "to"], ["search", "replace"]]) {
+      const thinking = `</think>\n<｜tool▁call▁begin｜>Edit<｜tool▁sep｜>path\n/x.md\n<｜tool▁sep｜>${oldKey}\nFOO\n<｜tool▁sep｜>${newKey}\nBAR\n<｜tool▁call▁end｜>`;
+      const { toolCalls } = extractDeepSeekResponse(thinking);
+      expect(toolCalls[0]).toEqual({
+        tool: "Edit",
+        args: { file_path: "/x.md", old_string: "FOO", new_string: "BAR" }
+      });
+    }
+  });
+
   it("maps Shell / Terminal aliases to Bash", () => {
     for (const name of ["Shell", "shell", "Terminal", "run_terminal_cmd", "RunTerminalCmd"]) {
       const thinking = `</think>\n<｜tool▁call▁begin｜>${name}<｜tool▁sep｜>command\nls\n<｜tool▁call▁end｜>`;
