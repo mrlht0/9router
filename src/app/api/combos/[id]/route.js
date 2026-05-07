@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getComboById, updateCombo, deleteCombo, getComboByName } from "@/lib/localDb";
+import { getCombos, getComboById, updateCombo, deleteCombo, getComboByName } from "@/lib/localDb";
+import { validateComboReferences } from "@/lib/comboValidation";
 import { resetComboRotation } from "open-sse/services/combo.js";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
@@ -27,6 +28,11 @@ export async function PUT(request, { params }) {
   try {
     const { id } = await params;
     const body = await request.json();
+    const prev = await getComboById(id);
+
+    if (!prev) {
+      return NextResponse.json({ error: "Combo not found" }, { status: 404 });
+    }
     
     // Validate name format if provided
     if (body.name) {
@@ -40,15 +46,18 @@ export async function PUT(request, { params }) {
         return NextResponse.json({ error: "Combo name already exists" }, { status: 400 });
       }
     }
+
+    const nextName = body.name ?? prev.name;
+    const nextModels = body.models ?? prev.models ?? [];
+    const combos = await getCombos();
+    const validation = validateComboReferences({ comboId: id, name: nextName, models: nextModels, combos });
+    if (!validation.valid) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
+    }
     
     // Capture previous name to invalidate rotation state on rename
-    const prev = await getComboById(id);
     const combo = await updateCombo(id, body);
     
-    if (!combo) {
-      return NextResponse.json({ error: "Combo not found" }, { status: 404 });
-    }
-
     // Invalidate rotation state (models/strategy/name may have changed)
     if (prev?.name) resetComboRotation(prev.name);
     if (combo.name && combo.name !== prev?.name) resetComboRotation(combo.name);
