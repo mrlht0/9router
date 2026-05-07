@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { jwtVerify } from "jose";
-import { getSettings, validateApiKey } from "@/lib/localDb";
+import { getSettings } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 
 const SECRET = new TextEncoder().encode(
@@ -67,42 +67,6 @@ function isBrowserRequest(request) {
   return accept.includes("text/html");
 }
 
-function extractApiKey(request) {
-  const authHeader = request.headers.get("authorization") || "";
-  if (authHeader.startsWith("Bearer ")) return authHeader.slice(7).trim() || null;
-  const xApiKey = request.headers.get("x-api-key");
-  if (xApiKey) return xApiKey;
-  const queryKey = request.nextUrl.searchParams.get("key");
-  if (queryKey) return queryKey;
-  return null;
-}
-
-async function isValidApiKey(key) {
-  if (!key) return false;
-  try {
-    return await validateApiKey(key);
-  } catch (e) {
-    console.error("dashboardGuard isValidApiKey error:", e.message);
-    return false;
-  }
-}
-
-const AUTH_ERROR_JSON = JSON.stringify({
-  error: {
-    message: "Missing bearer authentication in header",
-    type: "invalid_request_error",
-    param: null,
-    code: null,
-  },
-});
-
-function authErrorResponse() {
-  return new NextResponse(AUTH_ERROR_JSON, {
-    status: 401,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
 export async function proxy(request) {
   const { pathname } = request.nextUrl;
 
@@ -119,20 +83,11 @@ export async function proxy(request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // /v1/* and /api/v1/* - block browser
+  // /v1/* and /api/v1/* - block browser, handler enforces requireApiKey
   if (V1_API_PREFIXES.some((p) => pathname.startsWith(p))) {
     if (isBrowserRequest(request)) {
       return new NextResponse(null, { status: 404 });
     }
-
-    const settings = await loadSettings();
-    if (settings?.requireApiKey) {
-      const apiKey = extractApiKey(request);
-      if (!apiKey) return authErrorResponse();
-      const valid = await isValidApiKey(apiKey);
-      if (!valid) return authErrorResponse();
-    }
-
     return NextResponse.next();
   }
 
