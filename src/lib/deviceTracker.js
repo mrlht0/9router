@@ -2,7 +2,12 @@ import crypto from "crypto";
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 60 * 1000;
+const DEFAULT_MAX_DEVICES_PER_API_KEY = 1000;
+const DEFAULT_MAX_TOTAL_DEVICES = 10000;
+const MAX_STORED_USER_AGENT_LENGTH = 256;
 const TTL_ENV_NAME = "DEVICE_TRACKER_TTL_MS";
+const MAX_PER_KEY_ENV_NAME = "DEVICE_TRACKER_MAX_DEVICES_PER_KEY";
+const MAX_TOTAL_ENV_NAME = "DEVICE_TRACKER_MAX_TOTAL_DEVICES";
 
 function parseTtlMs() {
   const rawValue = process.env[TTL_ENV_NAME];
@@ -17,7 +22,22 @@ function parseTtlMs() {
   return parsedValue;
 }
 
+function parsePositiveIntegerEnv(envName, defaultValue) {
+  const rawValue = process.env[envName];
+  if (!rawValue) return defaultValue;
+
+  const parsedValue = Number(rawValue);
+  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
+    console.warn(`[deviceTracker] Invalid ${envName} value "${rawValue}"; using ${defaultValue}`);
+    return defaultValue;
+  }
+
+  return parsedValue;
+}
+
 const ttlMs = parseTtlMs();
+const maxDevicesPerApiKey = parsePositiveIntegerEnv(MAX_PER_KEY_ENV_NAME, DEFAULT_MAX_DEVICES_PER_API_KEY);
+const maxTotalDevices = parsePositiveIntegerEnv(MAX_TOTAL_ENV_NAME, DEFAULT_MAX_TOTAL_DEVICES);
 
 if (!global._apiKeyDeviceTracker) {
   global._apiKeyDeviceTracker = {
@@ -34,16 +54,18 @@ function getHeaderValue(request, headerName) {
 }
 
 function extractIp(request) {
+  const edgeIp = getHeaderValue(request, "cf-connecting-ip")
+    || getHeaderValue(request, "x-real-ip")
+    || getHeaderValue(request, "fastly-client-ip");
+  if (edgeIp) return edgeIp;
+
   const forwardedFor = getHeaderValue(request, "x-forwarded-for");
   if (forwardedFor) {
     const firstIp = forwardedFor.split(",")[0]?.trim();
     if (firstIp) return firstIp;
   }
 
-  return getHeaderValue(request, "x-real-ip")
-    || getHeaderValue(request, "cf-connecting-ip")
-    || getHeaderValue(request, "fastly-client-ip")
-    || "unknown";
+  return "unknown";
 }
 
 function extractUserAgent(request) {
@@ -52,6 +74,83 @@ function extractUserAgent(request) {
 
 function createFingerprint(ip, userAgent) {
   return crypto.createHash("sha256").update(`${ip}|${userAgent}`).digest("hex");
+}
+
+function truncateUserAgent(userAgent) {
+  if (userAgent.length <= MAX_STORED_USER_AGENT_LENGTH) return userAgent;
+  return `${userAgent.slice(0, MAX_STORED_USER_AGENT_LENGTH)}...`;
+}
+
+function maskIp(ip) {
+  if (!ip || ip === "unknown") return "unknown";
+
+  const ipv4Parts = ip.split(".");
+  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d{1,3}$/.test(part))) {
+    return `${ipv4Parts[0]}.${ipv4Parts[1]}.x.x`;
+  }
+
+  if (ip.includes(":")) {
+    const visibleGroups = ip.split(":").filter(Boolean).slice(0, 3).join(":");
+    return visibleGroups ? `${visibleGroups}:...` : "unknown";
+  }
+
+  return "masked";
+}
+
+function getTotalDeviceCount() {
+  let count = 0;
+
+  for (const devices of tracker.devicesByApiKey.values()) {
+    count += devices.size;
+  }
+
+  return count;
+}
+
+function deleteDevice(apiKey, fingerprint) {
+  const devices = tracker.devicesByApiKey.get(apiKey);
+  if (!devices) return false;
+
+  const deleted = devices.delete(fingerprint);
+  if (devices.size === 0) tracker.devicesByApiKey.delete(apiKey);
+
+  return deleted;
+}
+
+function findOldestDevice(apiKey = null) {
+  let oldest = null;
+  const entries = apiKey
+    ? [[apiKey, tracker.devicesByApiKey.get(apiKey)]]
+    : tracker.devicesByApiKey.entries();
+
+  for (const [entryApiKey, devices] of entries) {
+    if (!devices) continue;
+
+    for (const [fingerprint, record] of devices.entries()) {
+      if (!oldest || record.lastSeen < oldest.lastSeen) {
+        oldest = { apiKey: entryApiKey, fingerprint, lastSeen: record.lastSeen };
+      }
+    }
+  }
+
+  return oldest;
+}
+
+function evictOldestDevice(apiKey = null) {
+  const oldest = findOldestDevice(apiKey);
+  if (!oldest) return false;
+
+  return deleteDevice(oldest.apiKey, oldest.fingerprint);
+}
+
+function enforceDeviceLimits(apiKey, devices) {
+  while (devices.size >= maxDevicesPerApiKey) {
+    if (!evictOldestDevice(apiKey)) break;
+  }
+
+  while (getTotalDeviceCount() >= maxTotalDevices) {
+    if (!evictOldestDevice()) break;
+  }
 }
 
 function getVisibleCounts() {
@@ -156,7 +255,14 @@ export function trackDevice(apiKey, request) {
   if (existingRecord) {
     existingRecord.lastSeen = now;
   } else {
-    devices.set(fingerprint, { fingerprint, ip, userAgent, lastSeen: now });
+    enforceDeviceLimits(apiKey, devices);
+    if (!tracker.devicesByApiKey.has(apiKey)) tracker.devicesByApiKey.set(apiKey, devices);
+    devices.set(fingerprint, {
+      fingerprint,
+      ip: maskIp(ip),
+      userAgent: truncateUserAgent(userAgent),
+      lastSeen: now,
+    });
     console.log(`[deviceTracker] Tracked new device for API key ${apiKey.slice(0, 8)}...`);
   }
 
@@ -185,7 +291,7 @@ export function getDeviceDetails(apiKey) {
   if (!devices) return [];
 
   return Array.from(devices.values()).map((record) => ({
-    fingerprint: record.fingerprint,
+    fingerprint: record.fingerprint.slice(0, 12),
     ip: record.ip,
     userAgent: record.userAgent,
     lastSeen: record.lastSeen,

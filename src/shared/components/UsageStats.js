@@ -137,6 +137,37 @@ function groupDataByKey(data, keyField) {
   return Object.values(groups);
 }
 
+function mergeApiKeyDeviceCounts(existingByApiKey, incomingByApiKey) {
+  if (!existingByApiKey || !incomingByApiKey) return existingByApiKey;
+
+  const incomingCounts = new Map();
+  for (const [key, row] of Object.entries(incomingByApiKey)) {
+    const apiKey = row?.apiKeyKey || row?.apiKey || key;
+    if (!apiKey || apiKey === "local-no-key") continue;
+
+    incomingCounts.set(apiKey, Math.max(incomingCounts.get(apiKey) || 0, row.deviceCount || 0));
+  }
+
+  if (incomingCounts.size === 0) return existingByApiKey;
+
+  let changed = false;
+  const nextByApiKey = {};
+
+  for (const [key, row] of Object.entries(existingByApiKey)) {
+    const apiKey = row?.apiKeyKey || row?.apiKey || key;
+    const nextDeviceCount = incomingCounts.get(apiKey);
+
+    if (typeof nextDeviceCount === "number" && row.deviceCount !== nextDeviceCount) {
+      nextByApiKey[key] = { ...row, deviceCount: nextDeviceCount };
+      changed = true;
+    } else {
+      nextByApiKey[key] = row;
+    }
+  }
+
+  return changed ? nextByApiKey : existingByApiKey;
+}
+
 const MODEL_COLUMNS = [
   { field: "rawModel", label: "Model" },
   { field: "provider", label: "Provider" },
@@ -238,21 +269,25 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       });
   }, [period]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // SSE connection - real-time updates for activeRequests + recentRequests only
+  // SSE connection - merge live fields without overwriting period-filtered totals
   useEffect(() => {
     const es = new EventSource("/api/usage/stream");
 
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        // Always merge only real-time fields, never overwrite full stats from REST
-        setStats((prev) => ({
-          ...(prev || {}),
-          activeRequests: data.activeRequests,
-          recentRequests: data.recentRequests,
-          errorProvider: data.errorProvider,
-          pending: data.pending,
-        }));
+        setStats((prev) => {
+          if (!prev?.byApiKey) return data;
+
+          return {
+            ...prev,
+            activeRequests: data.activeRequests,
+            recentRequests: data.recentRequests,
+            errorProvider: data.errorProvider,
+            pending: data.pending,
+            byApiKey: mergeApiKeyDeviceCounts(prev.byApiKey, data.byApiKey),
+          };
+        });
         setLoading(false);
       } catch (err) {
         console.error("[SSE CLIENT] parse error:", err);
