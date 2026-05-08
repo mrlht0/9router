@@ -545,6 +545,14 @@ export async function getUsageStats(period = "all") {
     apiKeyMap[key.key] = { name: key.name, id: key.id, createdAt: key.createdAt };
   }
 
+  let deviceCounts = {};
+  try {
+    const { getAllDeviceCounts } = await import("@/lib/deviceTracker.js");
+    deviceCounts = getAllDeviceCounts();
+  } catch (error) {
+    console.error("[usageDb] Failed to load device counts:", error.message);
+  }
+
   // Recent requests (always from live history)
   const seen = new Set();
   const recentRequests = [...history]
@@ -694,7 +702,7 @@ export async function getUsageStats(period = "all") {
         const keyName = keyInfo?.name || (apiKeyVal ? apiKeyVal.slice(0, 8) + "..." : "Local (No API Key)");
         const apiKeyKey = apiKeyVal || "local-no-key";
         if (!stats.byApiKey[akKey]) {
-          stats.byApiKey[akKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0, rawModel, provider: providerDisplayName, apiKey: apiKeyVal, keyName, apiKeyKey, lastUsed: dateKey };
+          stats.byApiKey[akKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0, rawModel, provider: providerDisplayName, apiKey: apiKeyVal, keyName, apiKeyKey, deviceCount: apiKeyVal ? deviceCounts[apiKeyVal] || 0 : 0, lastUsed: dateKey };
         }
         stats.byApiKey[akKey].requests += akData.requests || 0;
         stats.byApiKey[akKey].promptTokens += akData.promptTokens || 0;
@@ -805,14 +813,14 @@ export async function getUsageStats(period = "all") {
         const keyName = keyInfo?.name || entry.apiKey.slice(0, 8) + "...";
         const apiKeyModelKey = `${entry.apiKey}|${entry.model}|${entry.provider || "unknown"}`;
         if (!stats.byApiKey[apiKeyModelKey]) {
-          stats.byApiKey[apiKeyModelKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0, rawModel: entry.model, provider: providerDisplayName, apiKey: entry.apiKey, keyName, apiKeyKey: entry.apiKey, lastUsed: entry.timestamp };
+          stats.byApiKey[apiKeyModelKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0, rawModel: entry.model, provider: providerDisplayName, apiKey: entry.apiKey, keyName, apiKeyKey: entry.apiKey, deviceCount: deviceCounts[entry.apiKey] || 0, lastUsed: entry.timestamp };
         }
         const ake = stats.byApiKey[apiKeyModelKey];
         ake.requests++; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cost += entryCost;
         if (new Date(entry.timestamp) > new Date(ake.lastUsed)) ake.lastUsed = entry.timestamp;
       } else {
         if (!stats.byApiKey["local-no-key"]) {
-          stats.byApiKey["local-no-key"] = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0, rawModel: entry.model, provider: providerDisplayName, apiKey: null, keyName: "Local (No API Key)", apiKeyKey: "local-no-key", lastUsed: entry.timestamp };
+          stats.byApiKey["local-no-key"] = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0, rawModel: entry.model, provider: providerDisplayName, apiKey: null, keyName: "Local (No API Key)", apiKeyKey: "local-no-key", deviceCount: 0, lastUsed: entry.timestamp };
         }
         const ake = stats.byApiKey["local-no-key"];
         ake.requests++; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cost += entryCost;
@@ -833,6 +841,12 @@ export async function getUsageStats(period = "all") {
 
   // Calculate totalRequests from period-filtered data (not lifetime)
   stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
+
+  for (const row of Object.values(stats.byApiKey || {})) {
+    if (typeof row.deviceCount !== "number" || !Number.isFinite(row.deviceCount) || row.deviceCount < 0) {
+      row.deviceCount = 0;
+    }
+  }
 
   return stats;
 }

@@ -122,7 +122,7 @@ function groupDataByKey(data, keyField) {
     if (!groups[gk]) {
       groups[gk] = {
         groupKey: gk,
-        summary: { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, inputCost: 0, outputCost: 0, lastUsed: null, pending: 0 },
+        summary: { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, inputCost: 0, outputCost: 0, lastUsed: null, pending: 0, deviceCount: 0 },
         items: [],
       };
     }
@@ -135,12 +135,44 @@ function groupDataByKey(data, keyField) {
     s.inputCost += item.inputCost || 0;
     s.outputCost += item.outputCost || 0;
     s.pending += item.pending || 0;
+    s.deviceCount = Math.max(s.deviceCount || 0, item.deviceCount || 0);
     if (item.lastUsed && (!s.lastUsed || new Date(item.lastUsed) > new Date(s.lastUsed))) {
       s.lastUsed = item.lastUsed;
     }
     groups[gk].items.push(item);
   });
   return Object.values(groups);
+}
+
+function mergeApiKeyDeviceCounts(existingByApiKey, incomingByApiKey) {
+  if (!existingByApiKey || !incomingByApiKey) return existingByApiKey;
+
+  const incomingCounts = new Map();
+  for (const [key, row] of Object.entries(incomingByApiKey)) {
+    const apiKey = row?.apiKeyKey || row?.apiKey || key;
+    if (!apiKey || apiKey === "local-no-key") continue;
+
+    incomingCounts.set(apiKey, Math.max(incomingCounts.get(apiKey) || 0, row.deviceCount || 0));
+  }
+
+  if (incomingCounts.size === 0) return existingByApiKey;
+
+  let changed = false;
+  const nextByApiKey = {};
+
+  for (const [key, row] of Object.entries(existingByApiKey)) {
+    const apiKey = row?.apiKeyKey || row?.apiKey || key;
+    const nextDeviceCount = incomingCounts.get(apiKey);
+
+    if (typeof nextDeviceCount === "number" && row.deviceCount !== nextDeviceCount) {
+      nextByApiKey[key] = { ...row, deviceCount: nextDeviceCount };
+      changed = true;
+    } else {
+      nextByApiKey[key] = row;
+    }
+  }
+
+  return changed ? nextByApiKey : existingByApiKey;
 }
 
 const MODEL_COLUMNS = [
@@ -163,6 +195,7 @@ const API_KEY_COLUMNS = [
   { field: "rawModel", label: "Model" },
   { field: "provider", label: "Provider" },
   { field: "requests", label: "Requests", align: "right" },
+  { field: "deviceCount", label: "Devices", align: "right" },
   { field: "lastUsed", label: "Last Used", align: "right" },
 ];
 
@@ -245,21 +278,25 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       });
   }, [period]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // SSE connection - real-time updates for activeRequests + recentRequests only
+  // SSE connection - merge live fields without overwriting period-filtered totals
   useEffect(() => {
     const es = new EventSource("/api/usage/stream");
 
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        // Always merge only real-time fields, never overwrite full stats from REST
-        setStats((prev) => ({
-          ...(prev || {}),
-          activeRequests: data.activeRequests,
-          recentRequests: data.recentRequests,
-          errorProvider: data.errorProvider,
-          pending: data.pending,
-        }));
+        setStats((prev) => {
+          if (!prev?.byApiKey) return data;
+
+          return {
+            ...prev,
+            activeRequests: data.activeRequests,
+            recentRequests: data.recentRequests,
+            errorProvider: data.errorProvider,
+            pending: data.pending,
+            byApiKey: mergeApiKeyDeviceCounts(prev.byApiKey, data.byApiKey),
+          };
+        });
         setLoading(false);
       } catch (err) {
         console.error("[SSE CLIENT] parse error:", err);
@@ -356,6 +393,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
               <td className="px-6 py-3 text-text-muted">—</td>
               <td className="px-6 py-3 text-text-muted">—</td>
               <td className="px-6 py-3 text-right">{fmt(group.summary.requests)}</td>
+              <td className="px-6 py-3 text-right">{fmt(group.summary.deviceCount)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(group.summary.lastUsed)}</td>
             </>
           ),
@@ -365,6 +403,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
               <td className="px-6 py-3">{item.rawModel}</td>
               <td className="px-6 py-3"><Badge variant="neutral" size="sm">{item.provider}</Badge></td>
               <td className="px-6 py-3 text-right">{fmt(item.requests)}</td>
+              <td className="px-6 py-3 text-right">{fmt(item.deviceCount)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(item.lastUsed)}</td>
             </>
           ),
