@@ -59,6 +59,9 @@ export const CONSOLE_LOG_CONFIG = {
 // Provider API endpoints (for display only)
 export const PROVIDER_ENDPOINTS = {
   openrouter: "https://openrouter.ai/api/v1/chat/completions",
+  bai: "https://api.b.ai/v1/chat/completions",
+  qiniu: "https://api.qnaigc.com/v1/chat/completions",
+  morph: "https://api.morphllm.com/v1/chat/completions",
   glm: "https://api.z.ai/api/anthropic/v1/messages",
   "glm-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
   kimi: "https://api.kimi.com/coding/v1/messages",
