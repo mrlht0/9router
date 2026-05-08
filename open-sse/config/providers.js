@@ -384,6 +384,16 @@ export const PROVIDERS = {
     baseUrl: "https://api.xiaomimimo.com/v1/chat/completions",
     format: "openai"
   },
+  // Windsurf / Codeium — Connect RPC via language_server (needs custom executor)
+  // Token format: sk-ws-01-... (extracted from Windsurf's Chromium state.vscdb)
+  // API: server.codeium.com — Cascade inference via Connect RPC + Protobuf
+  // See: https://github.com/decolua/9router/issues/332
+  windsurf: {
+    baseUrl: "https://server.codeium.com",
+    format: "windsurf",  // custom format, handled by WindsurfExecutor
+    headers: {},
+    authType: "api_key"  // token is used as Bearer
+  },
 };
 
 export const OLLAMA_LOCAL_DEFAULT_HOST = "http://localhost:11434";

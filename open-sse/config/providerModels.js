@@ -155,6 +155,15 @@ export const PROVIDER_MODELS = {
     { id: "gpt-5.2", name: "GPT 5.2" },
     { id: "gpt-5.3-codex", name: "GPT 5.3 Codex" },
   ],
+  ws: [  // Windsurf / Codeium Cascade (verified working by @Coral5644 — issue #332)
+    { id: "claude-opus-4.6", name: "Claude Opus 4.6" },
+    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6" },
+    { id: "claude-opus-4.7", name: "Claude Opus 4.7" },
+    { id: "gpt-5.3-codex", name: "GPT 5.3 Codex" },
+    { id: "gpt-5.4", name: "GPT 5.4" },
+    { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview" },
+    { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
+  ],
   kmc: [  // Kimi Coding
     { id: "kimi-k2.6", name: "Kimi K2.6" },
     { id: "kimi-k2.5", name: "Kimi K2.5" },
@@ -695,6 +704,7 @@ const OAUTH_ALIASES = {
   "kimi-coding": "kmc",
   kilocode: "kc",
   cline: "cl",
+  windsurf: "ws",
   opencode: "oc",
   vertex: "vertex",
   "vertex-partner": "vertex-partner",
