@@ -16,14 +16,32 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+function isValidDbData(data) {
+  return (
+    data &&
+    typeof data === "object" &&
+    Array.isArray(data.records)
+  );
+}
+
 let dbInstance = null;
 
 async function getDb() {
   if (!dbInstance) {
     const adapter = new JSONFile(DB_FILE);
     const db = new Low(adapter, { records: [] });
-    await db.read();
-    if (!db.data?.records) db.data = { records: [] };
+    try {
+      await db.read();
+      if (!isValidDbData(db.data)) {
+        db.data = { records: [] };
+        await db.write();
+      }
+    } catch (err) {
+      // Corrupt JSON file — reset to empty state
+      console.warn(`[requestDetailsDb] Corrupt DB file, resetting: ${err.message}`);
+      db.data = { records: [] };
+      try { await db.write(); } catch { /* ignore */ }
+    }
     dbInstance = db;
   }
   return dbInstance;
@@ -112,7 +130,12 @@ async function flushToDatabase() {
     writeBuffer = [];
 
     const db = await getDb();
+    if (!db) { isFlushing = false; return; }
     const config = await getObservabilityConfig();
+
+    if (!isValidDbData(db.data)) {
+      db.data = { records: [] };
+    }
 
     for (const item of itemsToSave) {
       if (!item.id) item.id = generateDetailId(item.model);
