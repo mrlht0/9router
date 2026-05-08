@@ -1,5 +1,5 @@
 import {
-  extractApiKey, isValidApiKey,
+  extractApiKey, isValidApiKey, isApiKeyAllowedForProvider,
   getProviderCredentials, markAccountUnavailable,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
@@ -70,6 +70,12 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language) {
 
   const { provider, model } = modelInfo;
   log.info("ROUTING", `Provider: ${provider}, Voice: ${model}`);
+
+  if (settings.requireApiKey) {
+    const apiKey = extractApiKey(request);
+    const allowed = await isApiKeyAllowedForProvider(apiKey, provider);
+    if (!allowed) return errorResponse(HTTP_STATUS.FORBIDDEN, `API key is not allowed to use provider: ${provider}`);
+  }
 
   // noAuth providers — no credential needed
   if (!CREDENTIALED_PROVIDERS.has(provider)) {

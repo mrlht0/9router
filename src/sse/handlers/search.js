@@ -4,6 +4,7 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  isApiKeyAllowedForProvider,
 } from "../services/auth.js";
 import { getSettings, getCombos } from "@/lib/localDb";
 import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js";
@@ -106,6 +107,14 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
   if (!supportsSearch) {
     log.warn("SEARCH", "Provider does not support web search", { provider: providerId });
     return errorResponse(HTTP_STATUS.BAD_REQUEST, `Provider ${providerId} does not support web search`);
+  }
+
+  if (settings.requireApiKey && apiKey) {
+    const allowed = await isApiKeyAllowedForProvider(apiKey, providerId);
+    if (!allowed) {
+      log.warn("AUTH", `API key not allowed for provider: ${providerId}`);
+      return errorResponse(HTTP_STATUS.FORBIDDEN, `API key is not allowed to use provider: ${providerId}`);
+    }
   }
 
   if (providerInput !== providerId) {

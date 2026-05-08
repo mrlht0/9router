@@ -47,6 +47,7 @@ function cloneDefaultData() {
     providerConnections: [],
     providerNodes: [],
     proxyPools: [],
+    providerPools: [],
     modelAliases: {},
     customModels: [],
     mitmAlias: {},
@@ -97,11 +98,19 @@ function ensureDbShape(data) {
       }
     }
 
-    // Migrate existing API keys to have isActive
+    // Migrate existing API keys to have isActive + allowedProviders
     if (key === "apiKeys" && Array.isArray(next.apiKeys)) {
       for (const apiKey of next.apiKeys) {
         if (apiKey.isActive === undefined || apiKey.isActive === null) {
           apiKey.isActive = true;
+          changed = true;
+        }
+        if (!Array.isArray(apiKey.allowedProviders)) {
+          apiKey.allowedProviders = [];
+          changed = true;
+        }
+        if (apiKey.providerPoolId === undefined) {
+          apiKey.providerPoolId = null;
           changed = true;
         }
       }
@@ -624,7 +633,7 @@ function generateShortKey() {
   return result;
 }
 
-export async function createApiKey(name, machineId) {
+export async function createApiKey(name, machineId, allowedProviders = [], providerPoolId = null) {
   if (!machineId) throw new Error("machineId is required");
 
   const db = await getDb();
@@ -639,6 +648,8 @@ export async function createApiKey(name, machineId) {
     key: result.key,
     machineId: machineId,
     isActive: true,
+    allowedProviders: Array.isArray(allowedProviders) ? allowedProviders : [],
+    providerPoolId: providerPoolId || null,
     createdAt: now,
   };
 
@@ -671,10 +682,70 @@ export async function updateApiKey(id, data) {
   return db.data.apiKeys[index];
 }
 
-export async function validateApiKey(key) {
+export async function getApiKeyRecord(key) {
   const db = await getDb();
-  const found = db.data.apiKeys.find(k => k.key === key);
+  return db.data.apiKeys.find(k => k.key === key) || null;
+}
+
+export async function validateApiKey(key) {
+  const found = await getApiKeyRecord(key);
   return found && found.isActive !== false;
+}
+
+export async function getProviderPools() {
+  const db = await getDb();
+  return db.data.providerPools || [];
+}
+
+export async function getProviderPoolById(id) {
+  const pools = await getProviderPools();
+  return pools.find((pool) => pool.id === id) || null;
+}
+
+export async function createProviderPool(data) {
+  const db = await getDb();
+  if (!db.data.providerPools) db.data.providerPools = [];
+  const now = new Date().toISOString();
+  const pool = {
+    id: uuidv4(),
+    name: data.name,
+    providerIds: Array.isArray(data.providerIds) ? data.providerIds : [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.data.providerPools.push(pool);
+  await safeWrite(db);
+  return pool;
+}
+
+export async function updateProviderPool(id, data) {
+  const db = await getDb();
+  if (!db.data.providerPools) db.data.providerPools = [];
+  const index = db.data.providerPools.findIndex((pool) => pool.id === id);
+  if (index === -1) return null;
+  db.data.providerPools[index] = {
+    ...db.data.providerPools[index],
+    ...data,
+    providerIds: Array.isArray(data.providerIds) ? data.providerIds : db.data.providerPools[index].providerIds,
+    updatedAt: new Date().toISOString(),
+  };
+  await safeWrite(db);
+  return db.data.providerPools[index];
+}
+
+export async function deleteProviderPool(id) {
+  const db = await getDb();
+  if (!db.data.providerPools) db.data.providerPools = [];
+  const index = db.data.providerPools.findIndex((pool) => pool.id === id);
+  if (index === -1) return false;
+  db.data.providerPools.splice(index, 1);
+  if (Array.isArray(db.data.apiKeys)) {
+    for (const key of db.data.apiKeys) {
+      if (key.providerPoolId === id) key.providerPoolId = null;
+    }
+  }
+  await safeWrite(db);
+  return true;
 }
 
 export async function cleanupProviderConnections() {

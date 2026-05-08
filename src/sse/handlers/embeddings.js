@@ -4,6 +4,7 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  isApiKeyAllowedForProvider,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
@@ -72,6 +73,14 @@ export async function handleEmbeddings(request) {
   }
 
   const { provider, model } = modelInfo;
+
+  if (settings.requireApiKey && apiKey) {
+    const allowed = await isApiKeyAllowedForProvider(apiKey, provider);
+    if (!allowed) {
+      log.warn("AUTH", `API key not allowed for provider: ${provider}`);
+      return errorResponse(HTTP_STATUS.FORBIDDEN, `API key is not allowed to use provider: ${provider}`);
+    }
+  }
 
   if (modelStr !== `${provider}/${model}`) {
     log.info("ROUTING", `${modelStr} → ${provider}/${model}`);
