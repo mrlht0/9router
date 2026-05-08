@@ -5,7 +5,7 @@
   
   **Never stop coding. Save 20-40% tokens with RTK + auto-fallback to FREE & cheap AI models.**
   
-  **Connect All AI Code Tools (Claude Code, Cursor, Antigravity, Copilot, Codex, Gemini, OpenCode, Cline, OpenClaw...) to 40+ AI Providers & 100+ Models.**
+  **Connect All AI Code Tools (Claude Code, Cursor, Antigravity, Copilot, Codex, Gemini, OpenCode, Cline, OpenClaw, Pi...) to 40+ AI Providers & 100+ Models.**
   
   [![npm](https://img.shields.io/npm/v/9router.svg)](https://www.npmjs.com/package/9router)
   [![Downloads](https://img.shields.io/npm/dm/9router.svg)](https://www.npmjs.com/package/9router)
@@ -36,7 +36,7 @@
 - ✅ **Maximize subscriptions** - Track quota, use every bit before reset
 - ✅ **Auto fallback** - Subscription → Cheap → Free, zero downtime
 - ✅ **Multi-account** - Round-robin between accounts per provider
-- ✅ **Universal** - Works with Claude Code, Codex, Cursor, Cline, any CLI tool
+- ✅ **Universal** - Works with Claude Code, Codex, Cursor, Cline, Pi, any CLI tool
 
 ---
 
@@ -44,7 +44,7 @@
 
 ```
 ┌─────────────┐
-│  Your CLI   │  (Claude Code, Codex, OpenClaw, Cursor, Cline...)
+│  Your CLI   │  (Claude Code, Codex, OpenClaw, Cursor, Cline, Pi...)
 │   Tool      │
 └──────┬──────┘
        │ http://localhost:20128/v1
@@ -232,6 +232,12 @@ Default URLs:
       <td align="center" width="120">
         <img src="./public/providers/kilocode.png" width="60" alt="Kilo Code"/><br/>
         <b>Kilo Code</b>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" width="120">
+        <img src="./public/providers/pi.svg" width="60" alt="Pi"/><br/>
+        <b>Pi</b>
       </td>
     </tr>
   </table>
@@ -1009,6 +1015,42 @@ Base URL: http://localhost:20128/v1
 API Key: [from dashboard]
 Model: cc/claude-opus-4-7
 ```
+
+### Pi Coding Agent
+
+**Option 1 — Dashboard (recommended):**
+
+```
+Dashboard → CLI Tools → Pi → Select Models → Apply
+```
+
+**Option 2 — Manual:** Edit `~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "9router": {
+      "baseUrl": "http://localhost:20128/v1",
+      "api": "openai-completions",
+      "apiKey": "sk_9router",
+      "models": [
+        { "id": "kr/claude-sonnet-4.5", "name": "Claude Sonnet 4.5" }
+      ]
+    }
+  }
+}
+```
+
+Then set the active model in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "defaultProvider": "9router",
+  "defaultModel": "kr/claude-sonnet-4.5"
+}
+```
+
+In Pi, run `/model` to choose among configured models.
 
 </details>
 

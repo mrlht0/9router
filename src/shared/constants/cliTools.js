@@ -114,6 +114,14 @@ export const CLI_TOOLS = {
     description: "OpenCode AI Terminal Assistant",
     configType: "custom",
   },
+  pi: {
+    id: "pi",
+    name: "Pi Coding Agent",
+    image: "/providers/pi.svg",
+    color: "#09090B",
+    description: "Pi terminal AI coding harness",
+    configType: "custom",
+  },
   cowork: {
     id: "cowork",
     name: "Claude Cowork",
