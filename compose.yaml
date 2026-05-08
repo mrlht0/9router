@@ -1,0 +1,37 @@
+services:
+  9router:
+    container_name: 9router
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${HOST_PORT:-20128}:20128"
+    environment:
+      NODE_ENV: production
+      PORT: 20128
+      HOSTNAME: 0.0.0.0
+      NEXT_TELEMETRY_DISABLED: 1
+      DATA_DIR: /app/data
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-secret}
+      INITIAL_PASSWORD: ${INITIAL_PASSWORD:-change-me}
+      API_KEY_SECRET: ${API_KEY_SECRET:-endpoint-proxy-api-key-secret}
+      MACHINE_ID_SALT: ${MACHINE_ID_SALT:-endpoint-proxy-salt}
+      ENABLE_REQUEST_LOGS: ${ENABLE_REQUEST_LOGS:-false}
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      REQUIRE_API_KEY: ${REQUIRE_API_KEY:-false}
+      BASE_URL: ${BASE_URL:-http://localhost:20128}
+      CLOUD_URL: ${CLOUD_URL:-https://9router.com}
+      NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:-http://localhost:20128}
+      NEXT_PUBLIC_CLOUD_URL: ${NEXT_PUBLIC_CLOUD_URL:-https://9router.com}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-localhost,127.0.0.1}
+    volumes:
+      - "${HOME}/.9router:/app/data"
+    restart: unless-stopped
