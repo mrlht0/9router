@@ -5,6 +5,7 @@ import path from "node:path";
 import fs from "node:fs";
 import lockfile from "proper-lockfile";
 import { DATA_DIR } from "@/lib/dataDir.js";
+import { createDocumentDb, isPostgresEnabled } from "@/lib/documentDb.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DB_FILE = path.join(DATA_DIR, "db.json");
@@ -171,6 +172,14 @@ async function safeWrite(db) {
 }
 
 export async function getDb() {
+  if (isPostgresEnabled()) {
+    const pgDb = await createDocumentDb("localDb", cloneDefaultData(), DB_FILE);
+    const { data, changed } = ensureDbShape(pgDb.data);
+    pgDb.data = data;
+    if (changed) await pgDb.write();
+    return pgDb;
+  }
+
   if (!dbInstance) {
     dbInstance = new Low(new JSONFile(DB_FILE), cloneDefaultData());
   }

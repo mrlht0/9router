@@ -3,6 +3,7 @@ import { JSONFile } from "lowdb/node";
 import path from "node:path";
 import fs from "node:fs";
 import { DATA_DIR } from "@/lib/dataDir.js";
+import { createDocumentDb, isPostgresEnabled } from "@/lib/documentDb.js";
 
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
@@ -19,6 +20,15 @@ if (!fs.existsSync(DATA_DIR)) {
 let dbInstance = null;
 
 async function getDb() {
+  if (isPostgresEnabled()) {
+    const pgDb = await createDocumentDb("requestDetailsDb", { records: [] }, DB_FILE);
+    if (!pgDb.data?.records) {
+      pgDb.data = { records: [] };
+      await pgDb.write();
+    }
+    return pgDb;
+  }
+
   if (!dbInstance) {
     const adapter = new JSONFile(DB_FILE);
     const db = new Low(adapter, { records: [] });

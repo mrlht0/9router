@@ -4,6 +4,7 @@ import { EventEmitter } from "events";
 import path from "path";
 import fs from "fs";
 import { DATA_DIR } from "@/lib/dataDir.js";
+import { createDocumentDb, isPostgresEnabled } from "@/lib/documentDb.js";
 
 const DB_FILE = path.join(DATA_DIR, "usage.json");
 const LOG_FILE = path.join(DATA_DIR, "log.txt");
@@ -264,6 +265,26 @@ export async function getActiveRequests() {
  * Get usage database instance (singleton)
  */
 export async function getUsageDb() {
+  if (isPostgresEnabled()) {
+    const pgDb = await createDocumentDb("usageDb", defaultData, DB_FILE);
+    if (!pgDb.data || typeof pgDb.data !== "object") {
+      pgDb.data = { ...defaultData };
+      await pgDb.write();
+    }
+    if (!Array.isArray(pgDb.data.history)) pgDb.data.history = [];
+    if (typeof pgDb.data.totalRequestsLifetime !== "number") {
+      pgDb.data.totalRequestsLifetime = pgDb.data.history.length;
+    }
+    if (!pgDb.data.dailySummary) {
+      if (migrateHistoryToDailySummary(pgDb)) {
+        await pgDb.write();
+      } else {
+        pgDb.data.dailySummary = {};
+      }
+    }
+    return pgDb;
+  }
+
   if (!dbInstance) {
     const adapter = new JSONFile(DB_FILE);
     dbInstance = new Low(adapter, defaultData);

@@ -3,6 +3,7 @@ import { JSONFile } from "lowdb/node";
 import path from "node:path";
 import fs from "node:fs";
 import { DATA_DIR } from "@/lib/dataDir.js";
+import { createDocumentDb, isPostgresEnabled } from "@/lib/documentDb.js";
 
 const DB_FILE = path.join(DATA_DIR, "disabledModels.json");
 
@@ -13,6 +14,13 @@ const defaultData = { disabled: {} };
 let dbInstance = null;
 
 async function getDb() {
+  if (isPostgresEnabled()) {
+    const pgDb = await createDocumentDb("disabledModelsDb", defaultData, DB_FILE);
+    if (!pgDb.data || typeof pgDb.data !== "object") pgDb.data = { ...defaultData };
+    if (!pgDb.data.disabled) pgDb.data.disabled = {};
+    return pgDb;
+  }
+
   if (!dbInstance) {
     const adapter = new JSONFile(DB_FILE);
     dbInstance = new Low(adapter, defaultData);
