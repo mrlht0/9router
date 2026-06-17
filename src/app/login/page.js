@@ -60,7 +60,7 @@ export default function LoginPage() {
 
   const oidcAvailable = oidcConfigured && ["oidc", "both"].includes(authMode);
   const passwordAvailable = authMode !== "oidc" || !oidcConfigured;
-  const canShowRegister = allowRegistration && !hasUsers;
+  const canShowRegister = allowRegistration;
 
   function switchView(nextView) {
     setError("");

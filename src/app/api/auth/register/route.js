@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { cookies } from "next/headers";
-import { createUser, getUsers } from "@/lib/localDb";
+import { createUser } from "@/lib/localDb";
 import { setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
 
 function normalizeEmail(email) {
@@ -10,11 +10,6 @@ function normalizeEmail(email) {
 
 export async function POST(request) {
   try {
-    const existingUsers = await getUsers();
-    if (existingUsers.length > 0) {
-      return NextResponse.json({ error: "Registration is disabled after the first account is created" }, { status: 403 });
-    }
-
     const { email, password } = await request.json();
     const normalizedEmail = normalizeEmail(email);
     if (!normalizedEmail) {
@@ -28,7 +23,7 @@ export async function POST(request) {
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const user = await createUser({ email: normalizedEmail, passwordHash, bootstrapOnly: true });
+    const user = await createUser({ email: normalizedEmail, passwordHash });
 
     const cookieStore = await cookies();
     await setDashboardAuthCookie(cookieStore, request, {
@@ -47,11 +42,7 @@ export async function POST(request) {
     });
   } catch (error) {
     const message = error?.message || "Registration failed";
-    const status = message === "Email already exists"
-      ? 409
-      : message === "Bootstrap registration already completed"
-        ? 403
-        : 500;
+    const status = message === "Email already exists" ? 409 : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }

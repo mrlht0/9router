@@ -16,8 +16,8 @@ export async function GET() {
     const oidcName = String(session?.oidcName || "").trim();
     const oidcEmail = String(session?.oidcEmail || "").trim();
     const userEmail = String(session?.userEmail || "").trim();
-    const displayName = oidcName || oidcEmail || userEmail || (session?.oidc ? "OIDC user" : hasUsers ? "Local user" : "Password user");
-    const loginMethod = session?.oidc ? "OIDC" : (userEmail ? "Email/Password" : "Password");
+    const displayName = oidcName || oidcEmail || userEmail || (session?.oidc ? "OIDC user" : "Local user");
+    const loginMethod = session?.oidc ? "OIDC" : "Email/Password";
 
     return NextResponse.json({
       requireLogin,
@@ -26,7 +26,7 @@ export async function GET() {
       oidcLoginLabel: (settings.oidcLoginLabel || "Sign in with OIDC").trim() || "Sign in with OIDC",
       hasPassword: !!settings.password,
       hasUsers,
-      allowRegistration: !hasUsers,
+      allowRegistration: true,
       displayName,
       loginMethod,
       oidcName: oidcName || null,
@@ -44,7 +44,7 @@ export async function GET() {
       hasUsers: false,
       allowRegistration: true,
       displayName: "Local user",
-      loginMethod: "Password",
+      loginMethod: "Email/Password",
       oidcName: null,
       oidcEmail: null,
       userEmail: null,
