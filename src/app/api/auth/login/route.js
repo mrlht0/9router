@@ -41,6 +41,7 @@ export async function POST(request) {
       return NextResponse.json({ error: "Password login is disabled. Use OIDC sign in." }, { status: 403 });
     }
 
+    const storedHash = settings.password;
     let isValid = false;
     let authClaims = {};
     if (hasUsers) {
@@ -61,7 +62,6 @@ export async function POST(request) {
         }
       }
     } else {
-      const storedHash = settings.password;
       if (storedHash) {
         isValid = await bcrypt.compare(password, storedHash);
       } else {
@@ -78,7 +78,7 @@ export async function POST(request) {
       // Default password still in use on a remote client → force a password
       // change before the dashboard is exposed remotely (keeps local UX intact).
       const mustChangePassword =
-        !storedHash && !process.env.INITIAL_PASSWORD && !isLocalRequest(request);
+        !hasUsers && !storedHash && !process.env.INITIAL_PASSWORD && !isLocalRequest(request);
 
       return NextResponse.json({ success: true, mustChangePassword, hasUsers });
     }

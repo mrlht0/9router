@@ -5,6 +5,7 @@ import { Card, Button, Input } from "@/shared/components";
 import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
+  const [view, setView] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
@@ -55,6 +56,7 @@ export default function LoginPage() {
           setAuthMode(data.authMode || "password");
           setOidcConfigured(data.oidcConfigured === true);
           setOidcLoginLabel(data.oidcLoginLabel || "Sign in with OIDC");
+          setView(data.allowRegistration === true ? "register" : "login");
         } else {
           // Safe fallback on non-OK response to avoid infinite loading state.
           setHasPassword(true);
@@ -166,6 +168,15 @@ export default function LoginPage() {
   const passwordAvailable = authMode !== "oidc" || !oidcConfigured;
   const useUserAccounts = hasUsers;
   const showRegister = allowRegistration && !hasUsers;
+  const showRegisterView = showRegister && view === "register";
+  const showLoginView = view === "login" || !showRegister;
+
+  const switchView = (nextView) => {
+    setError("");
+    setResetHint("");
+    setRetryAfter(0);
+    setView(nextView);
+  };
 
   // Show loading state while checking password
   if (hasPassword === null) {
@@ -189,11 +200,11 @@ export default function LoginPage() {
           <p className="text-text-muted">
             {authMode === "oidc" && oidcConfigured
               ? "Sign in with your OIDC provider to access the dashboard"
-              : useUserAccounts
+              : showRegisterView
+                ? "Create the first dashboard account"
+                : useUserAccounts
                 ? "Sign in with your email and password"
-                : showRegister
-                  ? "Create the first dashboard account"
-                  : "Enter your password to access the dashboard"}
+                : "Sign in with the legacy password or create the first account"}
           </p>
         </div>
 
@@ -221,15 +232,38 @@ export default function LoginPage() {
             </form>
           ) : (
           <div className="flex flex-col gap-4">
+            {showRegister && (
+              <div className="grid grid-cols-2 gap-2 rounded-xl bg-sidebar/60 p-1">
+                <button
+                  type="button"
+                  onClick={() => switchView("login")}
+                  className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                    showLoginView ? "bg-primary text-white" : "text-text-muted hover:bg-black/5 dark:hover:bg-white/5"
+                  }`}
+                >
+                  Đăng nhập
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchView("register")}
+                  className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                    showRegisterView ? "bg-primary text-white" : "text-text-muted hover:bg-black/5 dark:hover:bg-white/5"
+                  }`}
+                >
+                  Đăng ký
+                </button>
+              </div>
+            )}
+
             {oidcAvailable && (
               <Button type="button" variant="primary" className="w-full" onClick={handleOidcLogin}>
                 {oidcLoginLabel}
               </Button>
             )}
 
-            {oidcAvailable && passwordAvailable && <div className="h-px bg-border/60" />}
+            {oidcAvailable && passwordAvailable && showLoginView && <div className="h-px bg-border/60" />}
 
-            {passwordAvailable ? (
+            {passwordAvailable && showLoginView ? (
               <form onSubmit={handleLogin} className="flex flex-col gap-4">
                 {((authMode === "oidc" && !oidcConfigured) || (authMode === "both" && !oidcConfigured)) && (
                   <p className="text-xs text-amber-600 dark:text-amber-400 text-center">
@@ -243,7 +277,7 @@ export default function LoginPage() {
                   </p>
                 )}
 
-                {useUserAccounts && (
+                {useUserAccounts ? (
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-medium">Email</label>
                     <Input
@@ -254,6 +288,20 @@ export default function LoginPage() {
                       required
                       autoFocus={!oidcAvailable}
                     />
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-medium">Email</label>
+                    <Input
+                      type="email"
+                      placeholder="Để trống nếu đăng nhập bằng mật khẩu hệ thống cũ"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      autoFocus={!oidcAvailable}
+                    />
+                    <p className="text-xs text-text-muted">
+                      Nếu hệ thống cũ chỉ có password, bạn có thể bỏ trống email và đăng nhập bằng password hiện tại.
+                    </p>
                   </div>
                 )}
 
@@ -301,13 +349,12 @@ export default function LoginPage() {
                   </p>
                 )}
               </form>
-            ) : (
+                ) : (
               error && <p className="text-xs text-red-500">{error}</p>
             )}
 
-            {showRegister && (
+            {showRegisterView && (
               <>
-                <div className="h-px bg-border/60" />
                 <form onSubmit={handleRegister} className="flex flex-col gap-4">
                   <p className="text-xs text-text-muted text-center">
                     No dashboard account exists yet. Create the first account to use email/password login.
