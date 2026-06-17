@@ -1,13 +1,32 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { Card, Button, Toggle, Input } from "@/shared/components";
+import Modal, { ConfirmModal } from "@/shared/components/Modal";
+import LanguageSwitcher from "@/shared/components/LanguageSwitcher";
 import { useTheme } from "@/shared/hooks/useTheme";
 import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
+import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
+import { LOCALE_FLAGS } from "@/shared/constants/locales";
+
+function getLocaleFromCookie() {
+  if (typeof document === "undefined") return "en";
+  const cookie = document.cookie
+    .split(";")
+    .find((c) => c.trim().startsWith(`${LOCALE_COOKIE}=`));
+  const value = cookie ? decodeURIComponent(cookie.split("=")[1]) : "en";
+  return normalizeLocale(value);
+}
 
 export default function ProfilePage() {
+  const router = useRouter();
   const { theme, setTheme, isDark } = useTheme();
+  const [locale, setLocale] = useState("en");
+  const [langOpen, setLangOpen] = useState(false);
+  const [shutdownOpen, setShutdownOpen] = useState(false);
+  const [isShuttingDown, setIsShuttingDown] = useState(false);
   const [settings, setSettings] = useState({ fallbackStrategy: "fill-first" });
   const [loading, setLoading] = useState(true);
   const [passwords, setPasswords] = useState({ current: "", new: "", confirm: "" });
@@ -15,6 +34,22 @@ export default function ProfilePage() {
   const [passLoading, setPassLoading] = useState(false);
   const [dbLoading, setDbLoading] = useState(false);
   const [dbStatus, setDbStatus] = useState({ type: "", message: "" });
+  const [dbAuth, setDbAuth] = useState({ open: false, mode: "", password: "" });
+  const pendingImportRef = useRef(null);
+  const [oidcForm, setOidcForm] = useState({
+    authMode: "password",
+    oidcIssuerUrl: "",
+    oidcClientId: "",
+    oidcScopes: "openid profile email",
+    oidcLoginLabel: "Sign in with OIDC",
+  });
+  const [oidcClientSecret, setOidcClientSecret] = useState("");
+  const [oidcStatus, setOidcStatus] = useState({ type: "", message: "" });
+  const [oidcLoading, setOidcLoading] = useState(false);
+  const [oidcTestLoading, setOidcTestLoading] = useState(false);
+  const [oidcTestStatus, setOidcTestStatus] = useState({ type: "", message: "" });
+  const [oidcRedirectUri, setOidcRedirectUri] = useState("/api/auth/oidc/callback");
+  const [oidcExpanded, setOidcExpanded] = useState(false);
   const importFileRef = useRef(null);
   const [proxyForm, setProxyForm] = useState({
     outboundProxyEnabled: false,
@@ -24,12 +59,27 @@ export default function ProfilePage() {
   const [proxyStatus, setProxyStatus] = useState({ type: "", message: "" });
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
+  const usesLocalAccounts = settings.hasUsers === true;
+  const hasCredentialProtection = settings.hasUsers === true || settings.hasPassword === true;
+
+  useEffect(() => {
+    setLocale(getLocaleFromCookie());
+  }, [langOpen]);
 
   useEffect(() => {
     fetch("/api/settings")
       .then((res) => res.json())
       .then((data) => {
         setSettings(data);
+        setOidcForm({
+          authMode: data?.authMode || "password",
+          oidcIssuerUrl: data?.oidcIssuerUrl || "",
+          oidcClientId: data?.oidcClientId || "",
+          oidcScopes: data?.oidcScopes || "openid profile email",
+          oidcLoginLabel: data?.oidcLoginLabel || "Sign in with OIDC",
+        });
+        setOidcClientSecret("");
+        if (data?.authMode === "oidc" || data?.authMode === "both") setOidcExpanded(true);
         setProxyForm({
           outboundProxyEnabled: data?.outboundProxyEnabled === true,
           outboundProxyUrl: data?.outboundProxyUrl || "",
@@ -41,6 +91,12 @@ export default function ProfilePage() {
         console.error("Failed to fetch settings:", err);
         setLoading(false);
       });
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setOidcRedirectUri(`${window.location.origin}/api/auth/oidc/callback`);
+    }
   }, []);
 
   const updateOutboundProxy = async (e) => {
@@ -256,6 +312,143 @@ export default function ProfilePage() {
     }
   };
 
+  const updateOidcForm = (field, value) => {
+    setOidcForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const saveOidcSettings = async (authMode = oidcForm.authMode || "password") => {
+    const issuerUrl = oidcForm.oidcIssuerUrl.trim();
+    const clientId = oidcForm.oidcClientId.trim();
+    const scopes = oidcForm.oidcScopes.trim();
+    const loginLabel = oidcForm.oidcLoginLabel.trim();
+    const secret = oidcClientSecret.trim();
+
+    if (authMode !== "password" && (!issuerUrl || !clientId || !secret) && !settings.oidcConfigured) {
+      setOidcStatus({ type: "error", message: "Issuer URL, client ID, and client secret are required to enable OIDC." });
+      return;
+    }
+
+    setOidcLoading(true);
+    setOidcStatus({ type: "", message: "" });
+    setOidcTestStatus({ type: "", message: "" });
+
+    try {
+      const payload = {
+        authMode,
+        oidcIssuerUrl: issuerUrl,
+        oidcClientId: clientId,
+        oidcScopes: scopes || "openid profile email",
+        oidcLoginLabel: loginLabel || "Sign in with OIDC",
+      };
+      if (secret) {
+        payload.oidcClientSecret = secret;
+      }
+
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setOidcForm({
+          authMode: data?.authMode || authMode,
+          oidcIssuerUrl: data?.oidcIssuerUrl || issuerUrl,
+          oidcClientId: data?.oidcClientId || clientId,
+          oidcScopes: data?.oidcScopes || scopes || "openid profile email",
+          oidcLoginLabel: data?.oidcLoginLabel || loginLabel || "Sign in with OIDC",
+        });
+        setOidcClientSecret("");
+        setOidcStatus({
+          type: "success",
+          message:
+            authMode === "oidc"
+              ? "OIDC login enabled"
+              : authMode === "both"
+                ? "Password and OIDC login enabled"
+                : "OIDC settings saved",
+        });
+      } else {
+        setOidcStatus({ type: "error", message: data.error || "Failed to save OIDC settings" });
+      }
+    } catch (err) {
+      setOidcStatus({ type: "error", message: "An error occurred" });
+    } finally {
+      setOidcLoading(false);
+    }
+  };
+
+  const testOidcConnection = async () => {
+    const issuerUrl = oidcForm.oidcIssuerUrl.trim();
+    const clientId = oidcForm.oidcClientId.trim();
+    const scopes = oidcForm.oidcScopes.trim();
+    const secret = oidcClientSecret.trim();
+
+    if (!issuerUrl || !clientId) {
+      setOidcTestStatus({ type: "error", message: "Issuer URL and client ID are required to test the connection." });
+      return;
+    }
+
+    setOidcTestLoading(true);
+    setOidcStatus({ type: "", message: "" });
+    setOidcTestStatus({ type: "", message: "" });
+
+    try {
+      const saveRes = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          authMode: oidcForm.authMode || settings.authMode || "password",
+          oidcIssuerUrl: issuerUrl,
+          oidcClientId: clientId,
+          oidcScopes: scopes || "openid profile email",
+          oidcLoginLabel: oidcForm.oidcLoginLabel.trim() || "Sign in with OIDC",
+          ...(secret ? { oidcClientSecret: secret } : {}),
+        }),
+      });
+
+      const saved = await saveRes.json().catch(() => ({}));
+      if (!saveRes.ok) {
+        setOidcTestStatus({
+          type: "error",
+          message: saved.error || "Failed to save OIDC settings before testing",
+        });
+        return;
+      }
+
+      const res = await fetch("/api/auth/oidc/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          issuerUrl: saved.oidcIssuerUrl || issuerUrl,
+          clientId: saved.oidcClientId || clientId,
+          scopes: saved.oidcScopes || scopes || "openid profile email",
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.ok) {
+        const statusMessage = data.clientSecretTested
+          ? data.clientSecretValid === true
+            ? `Connection OK. Discovery loaded from ${data.issuerUrl}. Client secret validated too.`
+            : `Connection OK. Discovery loaded from ${data.issuerUrl}. Client secret was not checked.`
+          : `Connection OK. Discovery loaded from ${data.issuerUrl}.`;
+        setOidcTestStatus({
+          type: "success",
+          message: statusMessage,
+        });
+      } else {
+        setOidcTestStatus({ type: "error", message: data.error || "OIDC connection test failed" });
+      }
+    } catch (err) {
+      setOidcTestStatus({ type: "error", message: "An error occurred" });
+    } finally {
+      setOidcTestLoading(false);
+    }
+  };
+
   const updateObservabilityEnabled = async (enabled) => {
     try {
       const res = await fetch("/api/settings", {
@@ -282,11 +475,13 @@ export default function ProfilePage() {
     }
   };
 
-  const handleExportDatabase = async () => {
+  const handleExportDatabase = async (password) => {
     setDbLoading(true);
     setDbStatus({ type: "", message: "" });
     try {
-      const res = await fetch("/api/settings/database");
+      const res = await fetch("/api/settings/database", {
+        headers: { "x-9r-password": password },
+      });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to export database");
@@ -313,13 +508,19 @@ export default function ProfilePage() {
     }
   };
 
-  const handleImportDatabase = async (event) => {
+  const handleImportDatabase = (event) => {
     const file = event.target.files?.[0];
+    if (importFileRef.current) importFileRef.current.value = "";
     if (!file) return;
-
-    setDbLoading(true);
+    pendingImportRef.current = file;
     setDbStatus({ type: "", message: "" });
+    setDbAuth({ open: true, mode: "import", password: "" });
+  };
 
+  const runImportDatabase = async (password) => {
+    const file = pendingImportRef.current;
+    if (!file) return;
+    setDbLoading(true);
     try {
       const raw = await file.text();
       const payload = JSON.parse(raw);
@@ -327,7 +528,7 @@ export default function ProfilePage() {
       const res = await fetch("/api/settings/database", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, password }),
       });
 
       const data = await res.json().catch(() => ({}));
@@ -340,14 +541,43 @@ export default function ProfilePage() {
     } catch (err) {
       setDbStatus({ type: "error", message: err.message || "Invalid backup file" });
     } finally {
-      if (importFileRef.current) {
-        importFileRef.current.value = "";
-      }
+      pendingImportRef.current = null;
       setDbLoading(false);
     }
   };
 
+  // Confirm password modal, then run export or import.
+  const handleDbAuthConfirm = async () => {
+    const { mode, password } = dbAuth;
+    setDbAuth({ open: false, mode: "", password: "" });
+    if (mode === "export") await handleExportDatabase(password);
+    else if (mode === "import") await runImportDatabase(password);
+  };
+
   const observabilityEnabled = settings.enableObservability === true;
+
+  const handleShutdown = async () => {
+    setIsShuttingDown(true);
+    try {
+      await fetch("/api/version/shutdown", { method: "POST" });
+    } catch (e) {
+      // Expected to fail as server shuts down; ignore error
+    }
+    setIsShuttingDown(false);
+    setShutdownOpen(false);
+  };
+
+  const handleLogout = async () => {
+    try {
+      const res = await fetch("/api/auth/logout", { method: "POST" });
+      if (res.ok) {
+        router.push("/login");
+        router.refresh();
+      }
+    } catch (err) {
+      console.error("Failed to logout:", err);
+    }
+  };
 
   return (
     <div className="max-w-2xl mx-auto px-4 sm:px-0">
@@ -389,14 +619,14 @@ export default function ProfilePage() {
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between p-3 rounded-lg bg-bg border border-border gap-2">
               <div>
                 <p className="font-medium text-sm sm:text-base">Database Location</p>
-                <p className="text-xs sm:text-sm text-text-muted font-mono break-all">~/.9router/db.json</p>
+                <p className="text-xs sm:text-sm text-text-muted font-mono break-all">~/.9router/db/data.sqlite</p>
               </div>
             </div>
             <div className="flex flex-col sm:flex-row gap-2">
               <Button
                 variant="secondary"
                 icon="download"
-                onClick={handleExportDatabase}
+                onClick={() => setDbAuth({ open: true, mode: "export", password: "" })}
                 loading={dbLoading}
                 className="w-full sm:w-auto"
               >
@@ -427,6 +657,24 @@ export default function ProfilePage() {
           </div>
         </Card>
 
+        {/* Language */}
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="size-10 rounded-lg bg-blue-500/10 text-blue-500 flex items-center justify-center shrink-0">
+              <span className="material-symbols-outlined text-[20px]">language</span>
+            </div>
+            <h3 className="text-base sm:text-lg font-semibold">Language</h3>
+          </div>
+          <button
+            onClick={() => setLangOpen(true)}
+            className="flex items-center justify-between w-full p-3 rounded-lg bg-bg border border-border hover:border-primary/50 transition-colors"
+            data-i18n-skip="true"
+          >
+            <span className="text-sm text-text-muted">Display language</span>
+            <span className="text-2xl">{LOCALE_FLAGS[locale] || "🌐"}</span>
+          </button>
+        </Card>
+
         {/* Security */}
         <Card>
           <div className="flex items-center gap-3 mb-4">
@@ -439,9 +687,9 @@ export default function ProfilePage() {
             <div className="flex items-start sm:items-center justify-between gap-4">
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm sm:text-base">Require login</p>
-                <p className="text-xs sm:text-sm text-text-muted">
-                  When ON, dashboard requires password. When OFF, access without login.
-                </p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    When ON, dashboard requires sign-in. When OFF, access without login.
+                  </p>
               </div>
               <Toggle
                 checked={settings.requireLogin === true}
@@ -451,12 +699,12 @@ export default function ProfilePage() {
             </div>
             {settings.requireLogin === true && (
               <form onSubmit={handlePasswordChange} className="flex flex-col gap-4 pt-4 border-t border-border/50">
-                {settings.hasPassword && (
+                {(settings.hasPassword || usesLocalAccounts) && (
                   <div className="flex flex-col gap-2">
                     <label className="text-xs sm:text-sm font-medium">Current Password</label>
                     <Input
                       type="password"
-                      placeholder="Enter current password"
+                      placeholder={usesLocalAccounts ? "Enter your account password" : "Enter current password"}
                       value={passwords.current}
                       onChange={(e) => setPasswords({ ...passwords, current: e.target.value })}
                       required
@@ -475,7 +723,7 @@ export default function ProfilePage() {
                     <label className="text-xs sm:text-sm font-medium">New Password</label>
                     <Input
                       type="password"
-                      placeholder="Enter new password"
+                      placeholder={usesLocalAccounts ? "Enter a new account password" : "Enter new password"}
                       value={passwords.new}
                       onChange={(e) => setPasswords({ ...passwords, new: e.target.value })}
                       required
@@ -500,13 +748,176 @@ export default function ProfilePage() {
                 )}
 
                 <div className="pt-2">
-                  <Button type="submit" variant="primary" loading={passLoading} className="w-full sm:w-auto">
-                    {settings.hasPassword ? "Update Password" : "Set Password"}
-                  </Button>
-                </div>
-              </form>
+                    <Button type="submit" variant="primary" loading={passLoading} className="w-full sm:w-auto">
+                     {hasCredentialProtection ? "Update Password" : "Set Password"}
+                    </Button>
+                  </div>
+                </form>
             )}
           </div>
+        </Card>
+
+        {/* OIDC */}
+        <Card>
+          <button
+            type="button"
+            onClick={() => setOidcExpanded((v) => !v)}
+            className="w-full flex items-center gap-3 text-left"
+          >
+            <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-500 shrink-0">
+              <span className="material-symbols-outlined text-[20px]">lock_open</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-base sm:text-lg font-semibold">OIDC Dashboard Login</h3>
+                <p className="text-xs text-text-muted">
+                  {settings.authMode === "oidc" ? "OIDC active" : settings.authMode === "both" ? "Local account + OIDC active" : "Optional SSO via Authentik/Keycloak/Google"}
+                </p>
+            </div>
+            <span className="material-symbols-outlined text-text-muted shrink-0">
+              {oidcExpanded ? "expand_less" : "expand_more"}
+            </span>
+          </button>
+          {oidcExpanded && (
+          <div className="flex flex-col gap-4 mt-4">
+            <p className="text-xs sm:text-sm text-text-muted">
+              Use Authentik or any OIDC provider to sign in to the dashboard. You can enable password-only, OIDC-only, or both for the dashboard; model API access still uses API keys.
+            </p>
+
+            <div className="flex flex-col gap-2">
+              <label className="font-medium text-sm sm:text-base">Auth Mode</label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {[
+                  {
+                    value: "password",
+                    title: "Password only",
+                    desc: "Keep local password-based sign-in only.",
+                  },
+                  {
+                    value: "oidc",
+                    title: "OIDC only",
+                    desc: "Require OIDC for dashboard access.",
+                  },
+                  {
+                    value: "both",
+                    title: "Both",
+                      desc: "Allow either local password sign-in or OIDC.",
+                  },
+                ].map((option) => {
+                  const active = oidcForm.authMode === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => updateOidcForm("authMode", option.value)}
+                      className={cn(
+                        "text-left rounded-lg border p-3 transition-colors",
+                        active
+                          ? "border-primary bg-primary/5"
+                          : "border-border bg-bg hover:bg-black/5 dark:hover:bg-white/5"
+                      )}
+                      disabled={loading || oidcLoading}
+                    >
+                      <p className="font-medium text-sm sm:text-base">{option.title}</p>
+                      <p className="text-xs sm:text-sm text-text-muted mt-1">{option.desc}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4">
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Issuer URL</label>
+                <Input
+                  placeholder="https://auth.example.com/application/o/9router/"
+                  value={oidcForm.oidcIssuerUrl}
+                  onChange={(e) => updateOidcForm("oidcIssuerUrl", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Client ID</label>
+                <Input
+                  placeholder="9router-dashboard"
+                  value={oidcForm.oidcClientId}
+                  onChange={(e) => updateOidcForm("oidcClientId", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Client Secret</label>
+                <Input
+                  type="password"
+                  placeholder="Leave blank to keep existing secret"
+                  value={oidcClientSecret}
+                  onChange={(e) => setOidcClientSecret(e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+                <p className="text-xs sm:text-sm text-text-muted">This value is write-only after saving.</p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Scopes</label>
+                <Input
+                  placeholder="openid profile email"
+                  value={oidcForm.oidcScopes}
+                  onChange={(e) => updateOidcForm("oidcScopes", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Login Button Label</label>
+                <Input
+                  placeholder="Sign in with OIDC"
+                  value={oidcForm.oidcLoginLabel}
+                  onChange={(e) => updateOidcForm("oidcLoginLabel", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border bg-bg p-3 text-xs sm:text-sm text-text-muted">
+              <p className="font-medium text-text-main mb-1">Redirect URI</p>
+              <code className="block break-all font-mono">{oidcRedirectUri}</code>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-border/50">
+              <Button type="button" variant="primary" loading={oidcLoading} onClick={() => saveOidcSettings()} className="w-full sm:w-auto">
+                Save auth mode
+              </Button>
+              <Button type="button" variant="outline" loading={oidcTestLoading} onClick={testOidcConnection} className="w-full sm:w-auto">
+                Test connection
+              </Button>
+            </div>
+
+            {oidcTestStatus.message && (
+              <p className={`text-xs sm:text-sm ${oidcTestStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
+                {oidcTestStatus.message}
+              </p>
+            )}
+
+            {oidcStatus.message && (
+              <p className={`text-xs sm:text-sm ${oidcStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
+                {oidcStatus.message}
+              </p>
+            )}
+
+            {settings.authMode === "oidc" && (
+              <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                 OIDC login is currently active. Local password sign-in is disabled until you switch back.
+                </p>
+              )}
+
+              {settings.authMode === "both" && (
+                <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                 Local password sign-in and OIDC are both active.
+                </p>
+              )}
+          </div>
+          )}
         </Card>
 
         {/* Routing Preferences */}
@@ -695,12 +1106,82 @@ export default function ProfilePage() {
           </div>
         </Card>
 
+        {/* Account actions */}
+        <div className="flex flex-col sm:flex-row gap-2">
+          <Button
+            variant="outline"
+            fullWidth
+            icon="power_settings_new"
+            onClick={() => setShutdownOpen(true)}
+            className="text-red-500 border-red-200 hover:bg-red-50 hover:border-red-300"
+          >
+            Shutdown
+          </Button>
+          <Button
+            variant="outline"
+            fullWidth
+            icon="logout"
+            onClick={handleLogout}
+          >
+            Logout
+          </Button>
+        </div>
+
         {/* App Info */}
         <div className="text-center text-xs sm:text-sm text-text-muted py-4">
           <p>{APP_CONFIG.name} v{APP_CONFIG.version}</p>
           <p className="mt-1">Local Mode - All data stored on your machine</p>
         </div>
       </div>
+
+      <LanguageSwitcher
+        hideTrigger
+        isOpen={langOpen}
+        onClose={(next) => {
+          setLangOpen(false);
+          setLocale(next);
+        }}
+      />
+      <ConfirmModal
+        isOpen={shutdownOpen}
+        onClose={() => setShutdownOpen(false)}
+        onConfirm={handleShutdown}
+        title="Close Proxy"
+        message="Are you sure you want to close the proxy server?"
+        confirmText="Close"
+        cancelText="Cancel"
+        variant="danger"
+        loading={isShuttingDown}
+      />
+
+      <Modal
+        isOpen={dbAuth.open}
+        onClose={() => setDbAuth({ open: false, mode: "", password: "" })}
+         title="Confirm Password"
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setDbAuth({ open: false, mode: "", password: "" })} disabled={dbLoading}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={handleDbAuthConfirm} loading={dbLoading} disabled={!dbAuth.password}>
+              Confirm
+            </Button>
+          </>
+        }
+      >
+          <p className="text-text-muted mb-3 text-sm">
+           Enter your current password to {dbAuth.mode === "export" ? "export" : "import"} the database.
+          </p>
+          <Input
+            type="password"
+            value={dbAuth.password}
+            onChange={(e) => setDbAuth((s) => ({ ...s, password: e.target.value }))}
+            onKeyDown={(e) => { if (e.key === "Enter" && dbAuth.password) handleDbAuthConfirm(); }}
+            placeholder={usesLocalAccounts ? "Current account password" : "Current password"}
+            autoFocus
+          />
+      </Modal>
     </div>
   );
 }

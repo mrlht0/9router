@@ -1,9 +1,8 @@
-import { Low } from "lowdb";
-import { JSONFile } from "lowdb/node";
 import path from "node:path";
 import fs from "node:fs";
 import { DATA_DIR } from "@/lib/dataDir.js";
-import { createDocumentDb, isPostgresEnabled } from "@/lib/documentDb.js";
+import { createDocumentDb } from "@/lib/documentDb.js";
+import { getCurrentUserScopeId, getUserScopeFromContext } from "@/lib/localDb.js";
 
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
@@ -17,26 +16,19 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-let dbInstance = null;
+async function resolveOwnerId() {
+  const scoped = getUserScopeFromContext();
+  if (scoped !== null) return scoped;
+  return await getCurrentUserScopeId();
+}
 
 async function getDb() {
-  if (isPostgresEnabled()) {
-    const pgDb = await createDocumentDb("requestDetailsDb", { records: [] }, DB_FILE);
-    if (!pgDb.data?.records) {
-      pgDb.data = { records: [] };
-      await pgDb.write();
-    }
-    return pgDb;
+  const pgDb = await createDocumentDb("requestDetailsDb", { records: [] }, DB_FILE);
+  if (!pgDb.data?.records) {
+    pgDb.data = { records: [] };
+    await pgDb.write();
   }
-
-  if (!dbInstance) {
-    const adapter = new JSONFile(DB_FILE);
-    const db = new Low(adapter, { records: [] });
-    await db.read();
-    if (!db.data?.records) db.data = { records: [] };
-    dbInstance = db;
-  }
-  return dbInstance;
+  return pgDb;
 }
 
 // Config cache
@@ -132,6 +124,7 @@ async function flushToDatabase() {
       // Serialize large fields
       const record = {
         id: item.id,
+        ownerId: item.ownerId || null,
         provider: item.provider || null,
         model: item.model || null,
         connectionId: item.connectionId || null,
@@ -188,6 +181,7 @@ export async function saveRequestDetail(detail) {
   const config = await getObservabilityConfig();
   if (!config.enabled) return;
 
+  detail.ownerId = await resolveOwnerId();
   writeBuffer.push(detail);
 
   if (writeBuffer.length >= config.batchSize) {
@@ -203,7 +197,8 @@ export async function saveRequestDetail(detail) {
 
 export async function getRequestDetails(filter = {}) {
   const db = await getDb();
-  let records = [...db.data.records];
+  const ownerId = await resolveOwnerId();
+  let records = [...db.data.records].filter((r) => (r.ownerId || null) === (ownerId || null));
 
   // Apply filters
   if (filter.provider) records = records.filter(r => r.provider === filter.provider);
@@ -230,7 +225,8 @@ export async function getRequestDetails(filter = {}) {
 
 export async function getRequestDetailById(id) {
   const db = await getDb();
-  return db.data.records.find(r => r.id === id) || null;
+  const ownerId = await resolveOwnerId();
+  return db.data.records.find(r => r.id === id && (r.ownerId || null) === (ownerId || null)) || null;
 }
 
 // Graceful shutdown — use named handler so we can remove it on re-registration

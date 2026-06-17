@@ -1,11 +1,9 @@
-import { Low } from "lowdb";
-import { JSONFile } from "lowdb/node";
 import { v4 as uuidv4 } from "uuid";
 import path from "node:path";
 import fs from "node:fs";
-import lockfile from "proper-lockfile";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { DATA_DIR } from "@/lib/dataDir.js";
-import { createDocumentDb, isPostgresEnabled } from "@/lib/documentDb.js";
+import { createDocumentDb } from "@/lib/documentDb.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DB_FILE = path.join(DATA_DIR, "db.json");
@@ -43,7 +41,7 @@ const DEFAULT_SETTINGS = {
   cavemanLevel: "full",
 };
 
-function cloneDefaultData() {
+function cloneScopedData() {
   return {
     providerConnections: [],
     providerNodes: [],
@@ -55,6 +53,14 @@ function cloneDefaultData() {
     apiKeys: [],
     settings: { ...DEFAULT_SETTINGS },
     pricing: {},
+  };
+}
+
+function cloneDefaultData() {
+  return {
+    users: [],
+    userData: {},
+    ...cloneScopedData(),
   };
 }
 
@@ -74,143 +80,157 @@ function ensureDbShape(data) {
       continue;
     }
 
-    if (key === "settings" && (typeof next.settings !== "object" || Array.isArray(next.settings))) {
-      next.settings = { ...defaultValue };
-      changed = true;
-      continue;
-    }
+  }
 
-    if (key === "settings" && typeof next.settings === "object" && !Array.isArray(next.settings)) {
-      for (const [settingKey, settingDefault] of Object.entries(defaultValue)) {
-        if (next.settings[settingKey] === undefined) {
-          // Backward-compat: if proxy URL was saved, default outboundProxyEnabled to true
-          if (
-            settingKey === "outboundProxyEnabled" &&
-            typeof next.settings.outboundProxyUrl === "string" &&
-            next.settings.outboundProxyUrl.trim()
-          ) {
-            next.settings.outboundProxyEnabled = true;
-          } else {
-            next.settings[settingKey] = settingDefault;
+  const normalizeScopedState = (state) => {
+    const scopedDefaults = cloneScopedData();
+    let scopedChanged = false;
+    for (const [key, defaultValue] of Object.entries(scopedDefaults)) {
+      if (state[key] === undefined || state[key] === null) {
+        state[key] = defaultValue;
+        scopedChanged = true;
+        continue;
+      }
+
+      if (key === "settings" && (typeof state.settings !== "object" || Array.isArray(state.settings))) {
+        state.settings = { ...defaultValue };
+        scopedChanged = true;
+        continue;
+      }
+
+      if (key === "settings" && typeof state.settings === "object" && !Array.isArray(state.settings)) {
+        for (const [settingKey, settingDefault] of Object.entries(defaultValue)) {
+          if (state.settings[settingKey] === undefined) {
+            if (
+              settingKey === "outboundProxyEnabled" &&
+              typeof state.settings.outboundProxyUrl === "string" &&
+              state.settings.outboundProxyUrl.trim()
+            ) {
+              state.settings.outboundProxyEnabled = true;
+            } else {
+              state.settings[settingKey] = settingDefault;
+            }
+            scopedChanged = true;
           }
-          changed = true;
+        }
+      }
+
+      if (key === "apiKeys" && Array.isArray(state.apiKeys)) {
+        for (const apiKey of state.apiKeys) {
+          if (apiKey.isActive === undefined || apiKey.isActive === null) {
+            apiKey.isActive = true;
+            scopedChanged = true;
+          }
         }
       }
     }
+    return scopedChanged;
+  };
 
-    // Migrate existing API keys to have isActive
-    if (key === "apiKeys" && Array.isArray(next.apiKeys)) {
-      for (const apiKey of next.apiKeys) {
-        if (apiKey.isActive === undefined || apiKey.isActive === null) {
-          apiKey.isActive = true;
-          changed = true;
-        }
-      }
+  if (typeof next.userData !== "object" || Array.isArray(next.userData)) {
+    next.userData = {};
+    changed = true;
+  }
+
+  if (normalizeScopedState(next)) changed = true;
+  for (const scopedState of Object.values(next.userData)) {
+    if (scopedState && typeof scopedState === "object" && !Array.isArray(scopedState)) {
+      if (normalizeScopedState(scopedState)) changed = true;
     }
   }
 
   return { data: next, changed };
 }
 
-let dbInstance = null;
+const userScopeStorage = new AsyncLocalStorage();
+let userMutationLock = Promise.resolve();
 
-const LOCK_OPTIONS = {
-  retries: { retries: 15, minTimeout: 50, maxTimeout: 3000 },
-  stale: 10000,
-};
-
-class LocalMutex {
-  constructor() {
-    this._queue = [];
-    this._locked = false;
-  }
-
-  async acquire() {
-    if (!this._locked) {
-      this._locked = true;
-      return () => this._release();
-    }
-    return new Promise((resolve) => {
-      this._queue.push(() => resolve(() => this._release()));
-    });
-  }
-
-  _release() {
-    const next = this._queue.shift();
-    if (next) next();
-    else this._locked = false;
-  }
-}
-
-const localMutex = new LocalMutex();
-
-async function withFileLock(db, operation) {
-  const releaseLocal = await localMutex.acquire();
-  let release = null;
+async function withUserMutationLock(fn) {
+  const previous = userMutationLock;
+  let release;
+  userMutationLock = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous;
   try {
-    release = await lockfile.lock(DB_FILE, LOCK_OPTIONS);
-    await operation();
-  } catch (error) {
-    if (error.code === "ELOCKED") {
-      console.warn(`[DB] File is locked, retrying...`);
-    }
-    throw error;
+    return await fn();
   } finally {
-    if (release) {
-      try { await release(); } catch (_) { }
-    }
-    releaseLocal();
+    release();
   }
 }
 
-async function safeRead(db) {
-  await withFileLock(db, () => db.read());
+export async function runWithUserScope(userId, fn) {
+  return await userScopeStorage.run({ userId: userId || null }, fn);
+}
+
+export function getUserScopeFromContext() {
+  return userScopeStorage.getStore()?.userId || null;
+}
+
+export async function getCurrentUserScopeId() {
+  return await resolveScopedUserId();
+}
+
+async function resolveScopedUserId() {
+  const scopedUserId = getUserScopeFromContext();
+  if (scopedUserId !== null) return scopedUserId;
+
+  try {
+    const { cookies } = await import("next/headers");
+    const cookieStore = await cookies();
+    const token = cookieStore.get("auth_token")?.value;
+    if (!token) return null;
+    const { getDashboardAuthSession } = await import("@/lib/auth/dashboardSession.js");
+    const session = await getDashboardAuthSession(token);
+    return session?.userId || null;
+  } catch {
+    return null;
+  }
+}
+
+function getScopedStateSync(rootData, userId) {
+  if (!userId) return rootData;
+  if (!rootData.userData || typeof rootData.userData !== "object" || Array.isArray(rootData.userData)) {
+    rootData.userData = {};
+  }
+  if (!rootData.userData[userId] || typeof rootData.userData[userId] !== "object" || Array.isArray(rootData.userData[userId])) {
+    rootData.userData[userId] = cloneScopedData();
+  }
+  const { data } = ensureDbShape(rootData);
+  return data.userData[userId];
+}
+
+async function getScopedDbContext() {
+  const db = await getDb();
+  const userId = await resolveScopedUserId();
+  const scope = getScopedStateSync(db.data, userId);
+  return { db, scope, userId };
+}
+
+function getAllScopedStates(rootData) {
+  const states = [{ ownerId: null, state: rootData }];
+  const userData = rootData.userData || {};
+  for (const [ownerId, state] of Object.entries(userData)) {
+    states.push({ ownerId, state });
+  }
+  return states;
 }
 
 async function safeWrite(db) {
-  await withFileLock(db, () => db.write());
+  await db.write();
 }
 
 export async function getDb() {
-  if (isPostgresEnabled()) {
-    const pgDb = await createDocumentDb("localDb", cloneDefaultData(), DB_FILE);
-    const { data, changed } = ensureDbShape(pgDb.data);
-    pgDb.data = data;
-    if (changed) await pgDb.write();
-    return pgDb;
-  }
-
-  if (!dbInstance) {
-    dbInstance = new Low(new JSONFile(DB_FILE), cloneDefaultData());
-  }
-
-  try {
-    await safeRead(dbInstance);
-  } catch (error) {
-    if (error instanceof SyntaxError) {
-      console.warn('[DB] Corrupt JSON detected, resetting to defaults...');
-      dbInstance.data = cloneDefaultData();
-      await safeWrite(dbInstance);
-    } else {
-      throw error;
-    }
-  }
-
-  if (!dbInstance.data) {
-    dbInstance.data = cloneDefaultData();
-    await safeWrite(dbInstance);
-  } else {
-    const { data, changed } = ensureDbShape(dbInstance.data);
-    dbInstance.data = data;
-    if (changed) await safeWrite(dbInstance);
-  }
-
-  return dbInstance;
+  const pgDb = await createDocumentDb("localDb", cloneDefaultData(), DB_FILE);
+  const { data, changed } = ensureDbShape(pgDb.data);
+  pgDb.data = data;
+  if (changed) await pgDb.write();
+  return pgDb;
 }
 
 export async function getProviderConnections(filter = {}) {
-  const db = await getDb();
-  let connections = db.data.providerConnections || [];
+  const { scope } = await getScopedDbContext();
+  let connections = scope.providerConnections || [];
 
   if (filter.provider) connections = connections.filter(c => c.provider === filter.provider);
   if (filter.isActive !== undefined) connections = connections.filter(c => c.isActive === filter.isActive);
@@ -220,20 +240,20 @@ export async function getProviderConnections(filter = {}) {
 }
 
 export async function getProviderNodes(filter = {}) {
-  const db = await getDb();
-  let nodes = db.data.providerNodes || [];
+  const { scope } = await getScopedDbContext();
+  let nodes = scope.providerNodes || [];
   if (filter.type) nodes = nodes.filter((node) => node.type === filter.type);
   return nodes;
 }
 
 export async function getProviderNodeById(id) {
-  const db = await getDb();
-  return db.data.providerNodes.find((node) => node.id === id) || null;
+  const { scope } = await getScopedDbContext();
+  return scope.providerNodes.find((node) => node.id === id) || null;
 }
 
 export async function createProviderNode(data) {
-  const db = await getDb();
-  if (!db.data.providerNodes) db.data.providerNodes = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.providerNodes) scope.providerNodes = [];
 
   const now = new Date().toISOString();
   const node = {
@@ -247,43 +267,43 @@ export async function createProviderNode(data) {
     updatedAt: now,
   };
 
-  db.data.providerNodes.push(node);
+  scope.providerNodes.push(node);
   await safeWrite(db);
   return node;
 }
 
 export async function updateProviderNode(id, data) {
-  const db = await getDb();
-  if (!db.data.providerNodes) db.data.providerNodes = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.providerNodes) scope.providerNodes = [];
 
-  const index = db.data.providerNodes.findIndex((node) => node.id === id);
+  const index = scope.providerNodes.findIndex((node) => node.id === id);
   if (index === -1) return null;
 
-  db.data.providerNodes[index] = {
-    ...db.data.providerNodes[index],
+  scope.providerNodes[index] = {
+    ...scope.providerNodes[index],
     ...data,
     updatedAt: new Date().toISOString(),
   };
 
   await safeWrite(db);
-  return db.data.providerNodes[index];
+  return scope.providerNodes[index];
 }
 
 export async function deleteProviderNode(id) {
-  const db = await getDb();
-  if (!db.data.providerNodes) db.data.providerNodes = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.providerNodes) scope.providerNodes = [];
 
-  const index = db.data.providerNodes.findIndex((node) => node.id === id);
+  const index = scope.providerNodes.findIndex((node) => node.id === id);
   if (index === -1) return null;
 
-  const [removed] = db.data.providerNodes.splice(index, 1);
+  const [removed] = scope.providerNodes.splice(index, 1);
   await safeWrite(db);
   return removed;
 }
 
 export async function getProxyPools(filter = {}) {
-  const db = await getDb();
-  let pools = db.data.proxyPools || [];
+  const { scope } = await getScopedDbContext();
+  let pools = scope.proxyPools || [];
 
   if (filter.isActive !== undefined) pools = pools.filter((pool) => pool.isActive === filter.isActive);
   if (filter.testStatus) pools = pools.filter((pool) => pool.testStatus === filter.testStatus);
@@ -292,13 +312,13 @@ export async function getProxyPools(filter = {}) {
 }
 
 export async function getProxyPoolById(id) {
-  const db = await getDb();
-  return (db.data.proxyPools || []).find((pool) => pool.id === id) || null;
+  const { scope } = await getScopedDbContext();
+  return (scope.proxyPools || []).find((pool) => pool.id === id) || null;
 }
 
 export async function createProxyPool(data) {
-  const db = await getDb();
-  if (!db.data.proxyPools) db.data.proxyPools = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.proxyPools) scope.proxyPools = [];
 
   const now = new Date().toISOString();
   const pool = {
@@ -316,80 +336,80 @@ export async function createProxyPool(data) {
     updatedAt: now,
   };
 
-  db.data.proxyPools.push(pool);
+  scope.proxyPools.push(pool);
   await safeWrite(db);
   return pool;
 }
 
 export async function updateProxyPool(id, data) {
-  const db = await getDb();
-  if (!db.data.proxyPools) db.data.proxyPools = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.proxyPools) scope.proxyPools = [];
 
-  const index = db.data.proxyPools.findIndex((pool) => pool.id === id);
+  const index = scope.proxyPools.findIndex((pool) => pool.id === id);
   if (index === -1) return null;
 
-  db.data.proxyPools[index] = {
-    ...db.data.proxyPools[index],
+  scope.proxyPools[index] = {
+    ...scope.proxyPools[index],
     ...data,
     updatedAt: new Date().toISOString(),
   };
 
   await safeWrite(db);
-  return db.data.proxyPools[index];
+  return scope.proxyPools[index];
 }
 
 export async function deleteProxyPool(id) {
-  const db = await getDb();
-  if (!db.data.proxyPools) db.data.proxyPools = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.proxyPools) scope.proxyPools = [];
 
-  const index = db.data.proxyPools.findIndex((pool) => pool.id === id);
+  const index = scope.proxyPools.findIndex((pool) => pool.id === id);
   if (index === -1) return null;
 
-  const [removed] = db.data.proxyPools.splice(index, 1);
+  const [removed] = scope.proxyPools.splice(index, 1);
   await safeWrite(db);
   return removed;
 }
 
 export async function deleteProviderConnectionsByProvider(providerId) {
-  const db = await getDb();
-  const beforeCount = db.data.providerConnections.length;
-  db.data.providerConnections = db.data.providerConnections.filter(
+  const { db, scope } = await getScopedDbContext();
+  const beforeCount = scope.providerConnections.length;
+  scope.providerConnections = scope.providerConnections.filter(
     (connection) => connection.provider !== providerId
   );
-  const deletedCount = beforeCount - db.data.providerConnections.length;
+  const deletedCount = beforeCount - scope.providerConnections.length;
   await safeWrite(db);
   return deletedCount;
 }
 
 export async function getProviderConnectionById(id) {
-  const db = await getDb();
-  return db.data.providerConnections.find(c => c.id === id) || null;
+  const { scope } = await getScopedDbContext();
+  return scope.providerConnections.find(c => c.id === id) || null;
 }
 
 export async function createProviderConnection(data) {
-  const db = await getDb();
+  const { db, scope } = await getScopedDbContext();
   const now = new Date().toISOString();
 
   // Upsert: check existing by provider + email (oauth) or provider + name (apikey)
   let existingIndex = -1;
   if (data.authType === "oauth" && data.email) {
-    existingIndex = db.data.providerConnections.findIndex(
+    existingIndex = scope.providerConnections.findIndex(
       c => c.provider === data.provider && c.authType === "oauth" && c.email === data.email
     );
   } else if (data.authType === "apikey" && data.name) {
-    existingIndex = db.data.providerConnections.findIndex(
+    existingIndex = scope.providerConnections.findIndex(
       c => c.provider === data.provider && c.authType === "apikey" && c.name === data.name
     );
   }
 
   if (existingIndex !== -1) {
-    db.data.providerConnections[existingIndex] = {
-      ...db.data.providerConnections[existingIndex],
+    scope.providerConnections[existingIndex] = {
+      ...scope.providerConnections[existingIndex],
       ...data,
       updatedAt: now,
     };
     await safeWrite(db);
-    return db.data.providerConnections[existingIndex];
+    return scope.providerConnections[existingIndex];
   }
 
   let connectionName = data.name || null;
@@ -397,7 +417,7 @@ export async function createProviderConnection(data) {
     if (data.email) {
       connectionName = data.email;
     } else {
-      const existingCount = db.data.providerConnections.filter(
+      const existingCount = scope.providerConnections.filter(
         c => c.provider === data.provider
       ).length;
       connectionName = `Account ${existingCount + 1}`;
@@ -406,7 +426,7 @@ export async function createProviderConnection(data) {
 
   let connectionPriority = data.priority;
   if (!connectionPriority) {
-    const providerConnections = db.data.providerConnections.filter(c => c.provider === data.provider);
+    const providerConnections = scope.providerConnections.filter(c => c.provider === data.provider);
     const maxPriority = providerConnections.reduce((max, c) => Math.max(max, c.priority || 0), 0);
     connectionPriority = maxPriority + 1;
   }
@@ -440,7 +460,7 @@ export async function createProviderConnection(data) {
     connection.providerSpecificData = data.providerSpecificData;
   }
 
-  db.data.providerConnections.push(connection);
+  scope.providerConnections.push(connection);
   await safeWrite(db);
   await reorderProviderConnections(data.provider);
 
@@ -448,14 +468,14 @@ export async function createProviderConnection(data) {
 }
 
 export async function updateProviderConnection(id, data) {
-  const db = await getDb();
-  const index = db.data.providerConnections.findIndex(c => c.id === id);
+  const { db, scope } = await getScopedDbContext();
+  const index = scope.providerConnections.findIndex(c => c.id === id);
   if (index === -1) return null;
 
-  const providerId = db.data.providerConnections[index].provider;
+  const providerId = scope.providerConnections[index].provider;
 
-  db.data.providerConnections[index] = {
-    ...db.data.providerConnections[index],
+  scope.providerConnections[index] = {
+    ...scope.providerConnections[index],
     ...data,
     updatedAt: new Date().toISOString(),
   };
@@ -463,16 +483,16 @@ export async function updateProviderConnection(id, data) {
   await safeWrite(db);
   if (data.priority !== undefined) await reorderProviderConnections(providerId);
 
-  return db.data.providerConnections[index];
+  return scope.providerConnections[index];
 }
 
 export async function deleteProviderConnection(id) {
-  const db = await getDb();
-  const index = db.data.providerConnections.findIndex(c => c.id === id);
+  const { db, scope } = await getScopedDbContext();
+  const index = scope.providerConnections.findIndex(c => c.id === id);
   if (index === -1) return false;
 
-  const providerId = db.data.providerConnections[index].provider;
-  db.data.providerConnections.splice(index, 1);
+  const providerId = scope.providerConnections[index].provider;
+  scope.providerConnections.splice(index, 1);
   await safeWrite(db);
   await reorderProviderConnections(providerId);
 
@@ -480,10 +500,10 @@ export async function deleteProviderConnection(id) {
 }
 
 export async function reorderProviderConnections(providerId) {
-  const db = await getDb();
-  if (!db.data.providerConnections) return;
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.providerConnections) return;
 
-  const providerConnections = db.data.providerConnections
+  const providerConnections = scope.providerConnections
     .filter(c => c.provider === providerId)
     .sort((a, b) => {
       const pDiff = (a.priority || 0) - (b.priority || 0);
@@ -499,81 +519,81 @@ export async function reorderProviderConnections(providerId) {
 }
 
 export async function getModelAliases() {
-  const db = await getDb();
-  return db.data.modelAliases || {};
+  const { scope } = await getScopedDbContext();
+  return scope.modelAliases || {};
 }
 
 export async function setModelAlias(alias, model) {
-  const db = await getDb();
-  db.data.modelAliases[alias] = model;
+  const { db, scope } = await getScopedDbContext();
+  scope.modelAliases[alias] = model;
   await safeWrite(db);
 }
 
 export async function deleteModelAlias(alias) {
-  const db = await getDb();
-  delete db.data.modelAliases[alias];
+  const { db, scope } = await getScopedDbContext();
+  delete scope.modelAliases[alias];
   await safeWrite(db);
 }
 
 // Custom models — user-added models with explicit type (llm/image/tts/embedding/...)
 export async function getCustomModels() {
-  const db = await getDb();
-  return db.data.customModels || [];
+  const { scope } = await getScopedDbContext();
+  return scope.customModels || [];
 }
 
 export async function addCustomModel({ providerAlias, id, type = "llm", name }) {
-  const db = await getDb();
-  if (!db.data.customModels) db.data.customModels = [];
-  const exists = db.data.customModels.some(
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.customModels) scope.customModels = [];
+  const exists = scope.customModels.some(
     (m) => m.providerAlias === providerAlias && m.id === id && (m.type || "llm") === type
   );
   if (exists) return false;
-  db.data.customModels.push({ providerAlias, id, type, name: name || id });
+  scope.customModels.push({ providerAlias, id, type, name: name || id });
   await safeWrite(db);
   return true;
 }
 
 export async function deleteCustomModel({ providerAlias, id, type = "llm" }) {
-  const db = await getDb();
-  if (!db.data.customModels) return;
-  db.data.customModels = db.data.customModels.filter(
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.customModels) return;
+  scope.customModels = scope.customModels.filter(
     (m) => !(m.providerAlias === providerAlias && m.id === id && (m.type || "llm") === type)
   );
   await safeWrite(db);
 }
 
 export async function getMitmAlias(toolName) {
-  const db = await getDb();
-  const all = db.data.mitmAlias || {};
+  const { scope } = await getScopedDbContext();
+  const all = scope.mitmAlias || {};
   if (toolName) return all[toolName] || {};
   return all;
 }
 
 export async function setMitmAliasAll(toolName, mappings) {
-  const db = await getDb();
-  if (!db.data.mitmAlias) db.data.mitmAlias = {};
-  db.data.mitmAlias[toolName] = mappings || {};
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.mitmAlias) scope.mitmAlias = {};
+  scope.mitmAlias[toolName] = mappings || {};
   await safeWrite(db);
 }
 
 export async function getCombos() {
-  const db = await getDb();
-  return db.data.combos || [];
+  const { scope } = await getScopedDbContext();
+  return scope.combos || [];
 }
 
 export async function getComboById(id) {
-  const db = await getDb();
-  return (db.data.combos || []).find(c => c.id === id) || null;
+  const { scope } = await getScopedDbContext();
+  return (scope.combos || []).find(c => c.id === id) || null;
 }
 
 export async function getComboByName(name) {
-  const db = await getDb();
-  return (db.data.combos || []).find(c => c.name === name) || null;
+  const { scope } = await getScopedDbContext();
+  return (scope.combos || []).find(c => c.name === name) || null;
 }
 
 export async function createCombo(data) {
-  const db = await getDb();
-  if (!db.data.combos) db.data.combos = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.combos) scope.combos = [];
 
   const now = new Date().toISOString();
   const combo = {
@@ -585,43 +605,43 @@ export async function createCombo(data) {
     updatedAt: now,
   };
 
-  db.data.combos.push(combo);
+  scope.combos.push(combo);
   await safeWrite(db);
   return combo;
 }
 
 export async function updateCombo(id, data) {
-  const db = await getDb();
-  if (!db.data.combos) db.data.combos = [];
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.combos) scope.combos = [];
 
-  const index = db.data.combos.findIndex(c => c.id === id);
+  const index = scope.combos.findIndex(c => c.id === id);
   if (index === -1) return null;
 
-  db.data.combos[index] = {
-    ...db.data.combos[index],
+  scope.combos[index] = {
+    ...scope.combos[index],
     ...data,
     updatedAt: new Date().toISOString(),
   };
 
   await safeWrite(db);
-  return db.data.combos[index];
+  return scope.combos[index];
 }
 
 export async function deleteCombo(id) {
-  const db = await getDb();
-  if (!db.data.combos) return false;
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.combos) return false;
 
-  const index = db.data.combos.findIndex(c => c.id === id);
+  const index = scope.combos.findIndex(c => c.id === id);
   if (index === -1) return false;
 
-  db.data.combos.splice(index, 1);
+  scope.combos.splice(index, 1);
   await safeWrite(db);
   return true;
 }
 
 export async function getApiKeys() {
-  const db = await getDb();
-  return db.data.apiKeys || [];
+  const { scope } = await getScopedDbContext();
+  return scope.apiKeys || [];
 }
 
 function generateShortKey() {
@@ -636,7 +656,7 @@ function generateShortKey() {
 export async function createApiKey(name, machineId) {
   if (!machineId) throw new Error("machineId is required");
 
-  const db = await getDb();
+  const { db, scope, userId } = await getScopedDbContext();
   const now = new Date().toISOString();
 
   const { generateApiKeyWithMachine } = await import("@/shared/utils/apiKey");
@@ -646,48 +666,67 @@ export async function createApiKey(name, machineId) {
     id: uuidv4(),
     name: name,
     key: result.key,
+    ownerId: userId || null,
     machineId: machineId,
     isActive: true,
     createdAt: now,
   };
 
-  db.data.apiKeys.push(apiKey);
+  scope.apiKeys.push(apiKey);
   await safeWrite(db);
   return apiKey;
 }
 
 export async function deleteApiKey(id) {
-  const db = await getDb();
-  const index = db.data.apiKeys.findIndex(k => k.id === id);
+  const { db, scope } = await getScopedDbContext();
+  const index = scope.apiKeys.findIndex(k => k.id === id);
   if (index === -1) return false;
 
-  db.data.apiKeys.splice(index, 1);
+  scope.apiKeys.splice(index, 1);
   await safeWrite(db);
   return true;
 }
 
 export async function getApiKeyById(id) {
-  const db = await getDb();
-  return db.data.apiKeys.find(k => k.id === id) || null;
+  const { scope } = await getScopedDbContext();
+  return scope.apiKeys.find(k => k.id === id) || null;
 }
 
 export async function updateApiKey(id, data) {
-  const db = await getDb();
-  const index = db.data.apiKeys.findIndex(k => k.id === id);
+  const { db, scope } = await getScopedDbContext();
+  const index = scope.apiKeys.findIndex(k => k.id === id);
   if (index === -1) return null;
-  db.data.apiKeys[index] = { ...db.data.apiKeys[index], ...data };
+  scope.apiKeys[index] = { ...scope.apiKeys[index], ...data };
   await safeWrite(db);
-  return db.data.apiKeys[index];
+  return scope.apiKeys[index];
 }
 
 export async function validateApiKey(key) {
   const db = await getDb();
-  const found = db.data.apiKeys.find(k => k.key === key);
+  const found = getAllScopedStates(db.data)
+    .flatMap(({ state }) => state.apiKeys || [])
+    .find((apiKey) => apiKey.key === key);
   return found && found.isActive !== false;
 }
 
-export async function cleanupProviderConnections() {
+export async function getApiKeyRecord(key) {
   const db = await getDb();
+  for (const { ownerId, state } of getAllScopedStates(db.data)) {
+    const found = (state.apiKeys || []).find((apiKey) => apiKey.key === key);
+    if (found) {
+      return { ...found, ownerId: found.ownerId ?? ownerId ?? null };
+    }
+  }
+  return null;
+}
+
+export async function getApiKeyOwnerId(key) {
+  const record = await getApiKeyRecord(key);
+  return record?.ownerId || null;
+}
+
+export async function cleanupProviderConnections() {
+  const { db, scope } = await getScopedDbContext();
   const fieldsToCheck = [
     "displayName", "email", "globalPriority", "defaultModel",
     "accessToken", "refreshToken", "expiresAt", "tokenType",
@@ -697,7 +736,7 @@ export async function cleanupProviderConnections() {
   ];
 
   let cleaned = 0;
-  for (const connection of db.data.providerConnections) {
+  for (const connection of scope.providerConnections) {
     for (const field of fieldsToCheck) {
       if (connection[field] === null || connection[field] === undefined) {
         delete connection[field];
@@ -714,21 +753,102 @@ export async function cleanupProviderConnections() {
   return cleaned;
 }
 
-export async function getSettings() {
+function normalizeUserEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+export async function getUsers() {
   const db = await getDb();
-  return db.data.settings || { cloudEnabled: false };
+  return Array.isArray(db.data.users) ? db.data.users : [];
+}
+
+export async function getUserById(id) {
+  const users = await getUsers();
+  return users.find((user) => user.id === id) || null;
+}
+
+export async function getUserByEmail(email) {
+  const normalizedEmail = normalizeUserEmail(email);
+  if (!normalizedEmail) return null;
+  const users = await getUsers();
+  return users.find((user) => normalizeUserEmail(user.email) === normalizedEmail) || null;
+}
+
+export async function createUser(data = {}) {
+  return await withUserMutationLock(async () => {
+    const db = await getDb();
+    if (!Array.isArray(db.data.users)) db.data.users = [];
+
+    const email = normalizeUserEmail(data.email);
+    if (!email) throw new Error("Email is required");
+    if (!data.passwordHash) throw new Error("passwordHash is required");
+    if (data.bootstrapOnly === true && db.data.users.length > 0) {
+      throw new Error("Bootstrap registration already completed");
+    }
+    if (db.data.users.some((user) => normalizeUserEmail(user.email) === email)) {
+      throw new Error("Email already exists");
+    }
+
+    const now = new Date().toISOString();
+    const user = {
+      id: data.id || uuidv4(),
+      email,
+      passwordHash: data.passwordHash,
+      name: String(data.name || "").trim() || null,
+      isActive: data.isActive !== false,
+      createdAt: now,
+      updatedAt: now,
+      lastLoginAt: null,
+    };
+
+    db.data.users.push(user);
+    getScopedStateSync(db.data, user.id);
+    await safeWrite(db);
+    return user;
+  });
+}
+
+export async function updateUser(id, updates = {}) {
+  const db = await getDb();
+  if (!Array.isArray(db.data.users)) db.data.users = [];
+
+  const index = db.data.users.findIndex((user) => user.id === id);
+  if (index === -1) return null;
+
+  const next = { ...updates };
+  if (Object.prototype.hasOwnProperty.call(next, "email")) {
+    const email = normalizeUserEmail(next.email);
+    if (!email) throw new Error("Email is required");
+    const duplicate = db.data.users.find((user, userIndex) => userIndex !== index && normalizeUserEmail(user.email) === email);
+    if (duplicate) throw new Error("Email already exists");
+    next.email = email;
+  }
+
+  db.data.users[index] = {
+    ...db.data.users[index],
+    ...next,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await safeWrite(db);
+  return db.data.users[index];
+}
+
+export async function getSettings() {
+  const { scope } = await getScopedDbContext();
+  return scope.settings || { cloudEnabled: false };
 }
 
 export async function updateSettings(updates) {
-  const db = await getDb();
-  db.data.settings = { ...db.data.settings, ...updates };
+  const { db, scope } = await getScopedDbContext();
+  scope.settings = { ...scope.settings, ...updates };
   await safeWrite(db);
-  return db.data.settings;
+  return scope.settings;
 }
 
 export async function exportDb() {
-  const db = await getDb();
-  return db.data || cloneDefaultData();
+  const { scope } = await getScopedDbContext();
+  return JSON.parse(JSON.stringify(scope || cloneScopedData()));
 }
 
 export async function importDb(payload) {
@@ -737,21 +857,21 @@ export async function importDb(payload) {
   }
 
   const nextData = {
-    ...cloneDefaultData(),
+    ...cloneScopedData(),
     ...payload,
     settings: {
-      ...cloneDefaultData().settings,
+      ...cloneScopedData().settings,
       ...(payload.settings && typeof payload.settings === "object" && !Array.isArray(payload.settings)
         ? payload.settings
         : {}),
     },
   };
 
-  const { data: normalized } = ensureDbShape(nextData);
-  const db = await getDb();
-  db.data = normalized;
+  const normalized = { ...cloneScopedData(), ...nextData };
+  const { db, scope } = await getScopedDbContext();
+  Object.assign(scope, normalized);
   await safeWrite(db);
-  return db.data;
+  return scope;
 }
 
 export async function isCloudEnabled() {
@@ -765,8 +885,8 @@ export async function getCloudUrl() {
 }
 
 export async function getPricing() {
-  const db = await getDb();
-  const userPricing = db.data.pricing || {};
+  const { scope } = await getScopedDbContext();
+  const userPricing = scope.pricing || {};
   const { PROVIDER_PRICING } = await import("@/shared/constants/pricing.js");
 
   const merged = {};
@@ -798,8 +918,8 @@ export async function getPricing() {
 export async function getPricingForModel(provider, model) {
   if (!model) return null;
 
-  const db = await getDb();
-  const userPricing = db.data.pricing || {};
+  const { scope } = await getScopedDbContext();
+  const userPricing = scope.pricing || {};
 
   if (provider && userPricing[provider]?.[model]) {
     return userPricing[provider][model];
@@ -810,42 +930,42 @@ export async function getPricingForModel(provider, model) {
 }
 
 export async function updatePricing(pricingData) {
-  const db = await getDb();
-  if (!db.data.pricing) db.data.pricing = {};
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.pricing) scope.pricing = {};
 
   for (const [provider, models] of Object.entries(pricingData)) {
-    if (!db.data.pricing[provider]) db.data.pricing[provider] = {};
+    if (!scope.pricing[provider]) scope.pricing[provider] = {};
     for (const [model, pricing] of Object.entries(models)) {
-      db.data.pricing[provider][model] = pricing;
+      scope.pricing[provider][model] = pricing;
     }
   }
 
   await safeWrite(db);
-  return db.data.pricing;
+  return scope.pricing;
 }
 
 export async function resetPricing(provider, model) {
-  const db = await getDb();
-  if (!db.data.pricing) db.data.pricing = {};
+  const { db, scope } = await getScopedDbContext();
+  if (!scope.pricing) scope.pricing = {};
 
   if (model) {
-    if (db.data.pricing[provider]) {
-      delete db.data.pricing[provider][model];
-      if (Object.keys(db.data.pricing[provider]).length === 0) {
-        delete db.data.pricing[provider];
+    if (scope.pricing[provider]) {
+      delete scope.pricing[provider][model];
+      if (Object.keys(scope.pricing[provider]).length === 0) {
+        delete scope.pricing[provider];
       }
     }
   } else {
-    delete db.data.pricing[provider];
+    delete scope.pricing[provider];
   }
 
   await safeWrite(db);
-  return db.data.pricing;
+  return scope.pricing;
 }
 
 export async function resetAllPricing() {
-  const db = await getDb();
-  db.data.pricing = {};
+  const { db, scope } = await getScopedDbContext();
+  scope.pricing = {};
   await safeWrite(db);
-  return db.data.pricing;
+  return scope.pricing;
 }

@@ -19,12 +19,17 @@ export function isPostgresEnabled() {
   return /^postgres(ql)?:\/\//i.test(getDatabaseUrl());
 }
 
+export function requirePostgres() {
+  const value = getDatabaseUrl();
+  if (!/^postgres(ql)?:\/\//i.test(value)) {
+    throw new Error("PostgreSQL is required. Set DATABASE_URL=postgresql://user:password@host:5432/dbname");
+  }
+  return value;
+}
+
 function getPool() {
   if (!pool) {
-    const connectionString = getDatabaseUrl();
-    if (!connectionString) {
-      throw new Error("DATABASE_URL is not configured");
-    }
+    const connectionString = requirePostgres();
     pool = new Pool({
       connectionString,
       ssl: connectionString.includes("supabase.com")
@@ -64,10 +69,7 @@ async function readSeedFile(seedFilePath, defaultData) {
 
 export async function createDocumentDb(namespace, defaultData, seedFilePath = "") {
   const defaults = cloneDefaultData(defaultData);
-
-  if (!isPostgresEnabled()) {
-    return null;
-  }
+  requirePostgres();
 
   await ensureTable(namespace);
 

@@ -1,10 +1,9 @@
-import { Low } from "lowdb";
-import { JSONFile } from "lowdb/node";
 import { EventEmitter } from "events";
 import path from "path";
 import fs from "fs";
 import { DATA_DIR } from "@/lib/dataDir.js";
-import { createDocumentDb, isPostgresEnabled } from "@/lib/documentDb.js";
+import { createDocumentDb } from "@/lib/documentDb.js";
+import { getCurrentUserScopeId, getUserScopeFromContext, runWithUserScope } from "@/lib/localDb.js";
 
 const DB_FILE = path.join(DATA_DIR, "usage.json");
 const LOG_FILE = path.join(DATA_DIR, "log.txt");
@@ -25,7 +24,44 @@ const defaultData = {
   history: [],
   totalRequestsLifetime: 0,
   dailySummary: {},
+  userData: {},
 };
+
+function createScopedUsageData() {
+  return {
+    history: [],
+    totalRequestsLifetime: 0,
+    dailySummary: {},
+  };
+}
+
+function ownerScopeKey(ownerId) {
+  return ownerId || "__global__";
+}
+
+async function resolveUsageOwnerId() {
+  const scoped = getUserScopeFromContext();
+  if (scoped !== null) return scoped;
+  return await getCurrentUserScopeId();
+}
+
+function getScopedUsageState(root, ownerId) {
+  if (!ownerId) return root;
+  if (!root.userData || typeof root.userData !== "object" || Array.isArray(root.userData)) {
+    root.userData = {};
+  }
+  if (!root.userData[ownerId] || typeof root.userData[ownerId] !== "object" || Array.isArray(root.userData[ownerId])) {
+    root.userData[ownerId] = createScopedUsageData();
+  }
+  return root.userData[ownerId];
+}
+
+async function getUsageDbContext() {
+  const db = await getUsageDb();
+  const ownerId = await resolveUsageOwnerId();
+  const scope = getScopedUsageState(db.data, ownerId);
+  return { db, scope, ownerId };
+}
 
 function getLocalDateKey(timestamp) {
   const d = timestamp ? new Date(timestamp) : new Date();
@@ -89,18 +125,15 @@ function migrateHistoryToDailySummary(db) {
   return true;
 }
 
-// Singleton instance
-let dbInstance = null;
-
 // Use global to share pending state across Next.js route modules
 if (!global._pendingRequests) {
-  global._pendingRequests = { byModel: {}, byAccount: {} };
+  global._pendingRequests = {};
 }
 const pendingRequests = global._pendingRequests;
 
 // Track last error provider for UI edge coloring (auto-clears after 10s)
 if (!global._lastErrorProvider) {
-  global._lastErrorProvider = { provider: "", ts: 0 };
+  global._lastErrorProvider = {};
 }
 const lastErrorProvider = global._lastErrorProvider;
 
@@ -120,38 +153,67 @@ const PENDING_TIMEOUT_MS = 60 * 1000; // 1 minute
 // In-memory ring buffer for recent requests (avoids disk I/O on every SSE emit)
 const RING_CAP = 50;
 const CONN_CACHE_TTL_MS = 30 * 1000;
-if (!global._recentRing) global._recentRing = { items: [], initialized: false };
-if (!global._connectionMapCache) global._connectionMapCache = { map: {}, ts: 0 };
+if (!global._recentRing) global._recentRing = {};
+if (!global._connectionMapCache) global._connectionMapCache = {};
 const recentRing = global._recentRing;
 const connCache = global._connectionMapCache;
 
+function getPendingState(ownerId) {
+  const key = ownerScopeKey(ownerId);
+  if (!pendingRequests[key]) pendingRequests[key] = { byModel: {}, byAccount: {} };
+  return pendingRequests[key];
+}
+
+function getErrorState(ownerId) {
+  const key = ownerScopeKey(ownerId);
+  if (!lastErrorProvider[key]) lastErrorProvider[key] = { provider: "", ts: 0 };
+  return lastErrorProvider[key];
+}
+
+function getRecentRingState(ownerId) {
+  const key = ownerScopeKey(ownerId);
+  if (!recentRing[key]) recentRing[key] = { items: [], initialized: false };
+  return recentRing[key];
+}
+
+function getConnCacheState(ownerId) {
+  const key = ownerScopeKey(ownerId);
+  if (!connCache[key]) connCache[key] = { map: {}, ts: 0 };
+  return connCache[key];
+}
+
 function pushToRing(entry) {
-  recentRing.items.push(entry);
-  if (recentRing.items.length > RING_CAP) {
-    recentRing.items = recentRing.items.slice(-RING_CAP);
+  const ring = getRecentRingState(entry.ownerId || null);
+  ring.items.push(entry);
+  if (ring.items.length > RING_CAP) {
+    ring.items = ring.items.slice(-RING_CAP);
   }
 }
 
-async function getConnectionMapCached() {
-  if (Date.now() - connCache.ts < CONN_CACHE_TTL_MS) return connCache.map;
+async function getConnectionMapCached(ownerId = null) {
+  const cache = getConnCacheState(ownerId);
+  if (Date.now() - cache.ts < CONN_CACHE_TTL_MS) return cache.map;
   try {
-    const { getProviderConnections } = await import("@/lib/localDb.js");
-    const allConnections = await getProviderConnections();
+    const allConnections = await runWithUserScope(ownerId, async () => {
+      const { getProviderConnections } = await import("@/lib/localDb.js");
+      return await getProviderConnections();
+    });
     const map = {};
     for (const conn of allConnections) map[conn.id] = conn.name || conn.email || conn.id;
-    connCache.map = map;
-    connCache.ts = Date.now();
+    cache.map = map;
+    cache.ts = Date.now();
   } catch {}
-  return connCache.map;
+  return cache.map;
 }
 
-async function ensureRingInitialized() {
-  if (recentRing.initialized) return;
-  recentRing.initialized = true;
+async function ensureRingInitialized(ownerId = null) {
+  const ring = getRecentRingState(ownerId);
+  if (ring.initialized) return;
+  ring.initialized = true;
   try {
-    const db = await getUsageDb();
-    const history = db.data.history || [];
-    recentRing.items = history.slice(-RING_CAP);
+    const { scope } = await runWithUserScope(ownerId, async () => await getUsageDbContext());
+    const history = scope.history || [];
+    ring.items = history.slice(-RING_CAP);
   } catch {}
 }
 
@@ -164,23 +226,26 @@ async function ensureRingInitialized() {
  * @param {boolean} [error] - true if ended with error
  */
 export function trackPendingRequest(model, provider, connectionId, started, error = false) {
+  const ownerId = getUserScopeFromContext();
+  const pendingState = getPendingState(ownerId);
+  const errorState = getErrorState(ownerId);
   const modelKey = provider ? `${model} (${provider})` : model;
-  const timerKey = `${connectionId}|${modelKey}`;
+  const timerKey = `${ownerScopeKey(ownerId)}|${connectionId}|${modelKey}`;
 
   // Track by model
-  if (!pendingRequests.byModel[modelKey]) pendingRequests.byModel[modelKey] = 0;
-  pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] + (started ? 1 : -1));
-  if (pendingRequests.byModel[modelKey] === 0) delete pendingRequests.byModel[modelKey];
+  if (!pendingState.byModel[modelKey]) pendingState.byModel[modelKey] = 0;
+  pendingState.byModel[modelKey] = Math.max(0, pendingState.byModel[modelKey] + (started ? 1 : -1));
+  if (pendingState.byModel[modelKey] === 0) delete pendingState.byModel[modelKey];
 
   // Track by account
   if (connectionId) {
-    if (!pendingRequests.byAccount[connectionId]) pendingRequests.byAccount[connectionId] = {};
-    if (!pendingRequests.byAccount[connectionId][modelKey]) pendingRequests.byAccount[connectionId][modelKey] = 0;
-    pendingRequests.byAccount[connectionId][modelKey] = Math.max(0, pendingRequests.byAccount[connectionId][modelKey] + (started ? 1 : -1));
-    if (pendingRequests.byAccount[connectionId][modelKey] === 0) {
-      delete pendingRequests.byAccount[connectionId][modelKey];
-      if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
-        delete pendingRequests.byAccount[connectionId];
+    if (!pendingState.byAccount[connectionId]) pendingState.byAccount[connectionId] = {};
+    if (!pendingState.byAccount[connectionId][modelKey]) pendingState.byAccount[connectionId][modelKey] = 0;
+    pendingState.byAccount[connectionId][modelKey] = Math.max(0, pendingState.byAccount[connectionId][modelKey] + (started ? 1 : -1));
+    if (pendingState.byAccount[connectionId][modelKey] === 0) {
+      delete pendingState.byAccount[connectionId][modelKey];
+      if (Object.keys(pendingState.byAccount[connectionId]).length === 0) {
+        delete pendingState.byAccount[connectionId];
       }
     }
   }
@@ -190,11 +255,11 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
     clearTimeout(pendingTimers[timerKey]);
     pendingTimers[timerKey] = setTimeout(() => {
       delete pendingTimers[timerKey];
-      if (pendingRequests.byModel[modelKey] > 0) {
-        pendingRequests.byModel[modelKey] = 0;
+      if (pendingState.byModel[modelKey] > 0) {
+        pendingState.byModel[modelKey] = 0;
       }
-      if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) {
-        pendingRequests.byAccount[connectionId][modelKey] = 0;
+      if (connectionId && pendingState.byAccount[connectionId]?.[modelKey] > 0) {
+        pendingState.byAccount[connectionId][modelKey] = 0;
       }
       statsEmitter.emit("pending");
     }, PENDING_TIMEOUT_MS);
@@ -206,8 +271,8 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
 
   // Track error provider (auto-clears after 10s)
   if (!started && error && provider) {
-    lastErrorProvider.provider = provider.toLowerCase();
-    lastErrorProvider.ts = Date.now();
+    errorState.provider = provider.toLowerCase();
+    errorState.ts = Date.now();
   }
 
   const t = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -218,11 +283,14 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
 /**
  * Lightweight: get only activeRequests + recentRequests without full stats recalc
  */
-export async function getActiveRequests() {
+export async function getActiveRequests(ownerId = null) {
   const activeRequests = [];
-  const connectionMap = await getConnectionMapCached();
+  const connectionMap = await getConnectionMapCached(ownerId);
+  const pendingState = getPendingState(ownerId);
+  const errorState = getErrorState(ownerId);
+  const ring = getRecentRingState(ownerId);
 
-  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
+  for (const [connectionId, models] of Object.entries(pendingState.byAccount)) {
     for (const [modelKey, count] of Object.entries(models)) {
       if (count > 0) {
         const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
@@ -235,9 +303,9 @@ export async function getActiveRequests() {
   }
 
   // Recent requests from in-memory ring (zero disk I/O)
-  await ensureRingInitialized();
+  await ensureRingInitialized(ownerId);
   const seen = new Set();
-  const recentRequests = [...recentRing.items]
+  const recentRequests = [...ring.items]
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
     .map((e) => {
       const t = e.tokens || {};
@@ -256,7 +324,7 @@ export async function getActiveRequests() {
     .slice(0, 20);
 
   // Error provider (auto-clear after 10s)
-  const errorProvider = (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "";
+  const errorProvider = (Date.now() - errorState.ts < 10000) ? errorState.provider : "";
 
   return { activeRequests, recentRequests, errorProvider };
 }
@@ -265,58 +333,24 @@ export async function getActiveRequests() {
  * Get usage database instance (singleton)
  */
 export async function getUsageDb() {
-  if (isPostgresEnabled()) {
-    const pgDb = await createDocumentDb("usageDb", defaultData, DB_FILE);
-    if (!pgDb.data || typeof pgDb.data !== "object") {
-      pgDb.data = { ...defaultData };
+  const pgDb = await createDocumentDb("usageDb", defaultData, DB_FILE);
+  if (!pgDb.data || typeof pgDb.data !== "object") {
+    pgDb.data = { ...defaultData };
+    await pgDb.write();
+  }
+  if (!Array.isArray(pgDb.data.history)) pgDb.data.history = [];
+  if (typeof pgDb.data.totalRequestsLifetime !== "number") {
+    pgDb.data.totalRequestsLifetime = pgDb.data.history.length;
+  }
+  if (!pgDb.data.dailySummary) {
+    if (migrateHistoryToDailySummary(pgDb)) {
       await pgDb.write();
-    }
-    if (!Array.isArray(pgDb.data.history)) pgDb.data.history = [];
-    if (typeof pgDb.data.totalRequestsLifetime !== "number") {
-      pgDb.data.totalRequestsLifetime = pgDb.data.history.length;
-    }
-    if (!pgDb.data.dailySummary) {
-      if (migrateHistoryToDailySummary(pgDb)) {
-        await pgDb.write();
-      } else {
-        pgDb.data.dailySummary = {};
-      }
-    }
-    return pgDb;
-  }
-
-  if (!dbInstance) {
-    const adapter = new JSONFile(DB_FILE);
-    dbInstance = new Low(adapter, defaultData);
-
-    // Try to read DB with error recovery for corrupt JSON
-    try {
-      await dbInstance.read();
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        console.warn('[DB] Corrupt Usage JSON detected, resetting to defaults...');
-        dbInstance.data = defaultData;
-        await dbInstance.write();
-      } else {
-        throw error;
-      }
-    }
-
-    if (!dbInstance.data) {
-      dbInstance.data = { ...defaultData };
-      await dbInstance.write();
-    }
-
-    // Migration: build dailySummary from existing history (one-time)
-    if (!dbInstance.data.dailySummary) {
-      if (migrateHistoryToDailySummary(dbInstance)) {
-        await dbInstance.write();
-      } else {
-        dbInstance.data.dailySummary = {};
-      }
+    } else {
+      pgDb.data.dailySummary = {};
     }
   }
-  return dbInstance;
+  if (!pgDb.data.userData || typeof pgDb.data.userData !== "object") pgDb.data.userData = {};
+  return pgDb;
 }
 
 /**
@@ -325,32 +359,33 @@ export async function getUsageDb() {
  */
 export async function saveRequestUsage(entry) {
   try {
-    const db = await getUsageDb();
+    const { db, scope, ownerId } = await getUsageDbContext();
 
     // Add timestamp if not present
     if (!entry.timestamp) {
       entry.timestamp = new Date().toISOString();
     }
+    entry.ownerId = ownerId || null;
 
     // Ensure history array exists
-    if (!Array.isArray(db.data.history)) {
-      db.data.history = [];
+    if (!Array.isArray(scope.history)) {
+      scope.history = [];
     }
-    if (typeof db.data.totalRequestsLifetime !== "number") {
-      db.data.totalRequestsLifetime = db.data.history.length;
+    if (typeof scope.totalRequestsLifetime !== "number") {
+      scope.totalRequestsLifetime = scope.history.length;
     }
 
     const entryCost = await calculateCost(entry.provider, entry.model, entry.tokens);
     entry.cost = entryCost;
-    db.data.history.push(entry);
-    db.data.totalRequestsLifetime += 1;
+    scope.history.push(entry);
+    scope.totalRequestsLifetime += 1;
 
-    if (!db.data.dailySummary) db.data.dailySummary = {};
-    aggregateEntryToDailySummary(db.data.dailySummary, entry);
+    if (!scope.dailySummary) scope.dailySummary = {};
+    aggregateEntryToDailySummary(scope.dailySummary, entry);
 
     const MAX_HISTORY = 2000;
-    if (db.data.history.length > MAX_HISTORY) {
-      db.data.history.splice(0, db.data.history.length - MAX_HISTORY);
+    if (scope.history.length > MAX_HISTORY) {
+      scope.history.splice(0, scope.history.length - MAX_HISTORY);
     }
 
     await db.write();
@@ -366,8 +401,8 @@ export async function saveRequestUsage(entry) {
  * @param {object} filter - Filter criteria
  */
 export async function getUsageHistory(filter = {}) {
-  const db = await getUsageDb();
-  let history = db.data.history || [];
+  const { scope } = await getUsageDbContext();
+  let history = scope.history || [];
 
   // Apply filters
   if (filter.provider) {
@@ -412,6 +447,7 @@ function formatLogDate(date = new Date()) {
 export async function appendRequestLog({ model, provider, connectionId, tokens, status }) {
   try {
     const timestamp = formatLogDate();
+    const ownerId = await resolveUsageOwnerId();
     const p = provider?.toUpperCase() || "-";
     const m = model || "-";
 
@@ -429,7 +465,7 @@ export async function appendRequestLog({ model, provider, connectionId, tokens, 
     const sent = tokens?.prompt_tokens !== undefined ? tokens.prompt_tokens : "-";
     const received = tokens?.completion_tokens !== undefined ? tokens.completion_tokens : "-";
 
-    const line = `${timestamp} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${status}\n`;
+    const line = `${ownerId || "global"} | ${timestamp} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${status}\n`;
 
     fs.appendFileSync(LOG_FILE, line);
 
@@ -465,9 +501,16 @@ export async function getRecentLogs(limit = 200) {
   }
   
   try {
+    const ownerId = await resolveUsageOwnerId();
     const content = fs.readFileSync(LOG_FILE, "utf-8");
     const lines = content.trim().split("\n");
-    return lines.slice(-limit).reverse();
+    return lines
+      .filter((line) => {
+        const [lineOwner] = line.split(" | ");
+        return (ownerId || "global") === lineOwner;
+      })
+      .slice(-limit)
+      .reverse();
   } catch (error) {
     console.error("[usageDb] Failed to read log.txt:", error.message);
     console.error("[usageDb] LOG_FILE path:", LOG_FILE);
@@ -538,9 +581,9 @@ const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 
  * @param {"24h"|"7d"|"30d"|"60d"|"all"} period - Time period to filter
  */
 export async function getUsageStats(period = "all") {
-  const db = await getUsageDb();
-  const history = db.data.history || [];
-  const dailySummary = db.data.dailySummary || {};
+  const { scope, ownerId } = await getUsageDbContext();
+  const history = scope.history || [];
+  const dailySummary = scope.dailySummary || {};
 
   const { getProviderConnections, getApiKeys, getProviderNodes } = await import("@/lib/localDb.js");
 
@@ -595,14 +638,14 @@ export async function getUsageStats(period = "all") {
     totalPromptTokens: 0, totalCompletionTokens: 0, totalCost: 0,
     byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
     last10Minutes: [],
-    pending: pendingRequests,
+    pending: getPendingState(ownerId),
     activeRequests: [],
     recentRequests,
-    errorProvider: (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "",
+    errorProvider: (Date.now() - getErrorState(ownerId).ts < 10000) ? getErrorState(ownerId).provider : "",
   };
 
   // Active requests from pending
-  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
+  for (const [connectionId, models] of Object.entries(getPendingState(ownerId).byAccount)) {
     for (const [modelKey, count] of Object.entries(models)) {
       if (count > 0) {
         const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
@@ -864,9 +907,9 @@ export async function getUsageStats(period = "all") {
  * @returns {Promise<Array<{label: string, tokens: number, cost: number}>>}
  */
 export async function getChartData(period = "7d") {
-  const db = await getUsageDb();
-  const history = db.data.history || [];
-  const dailySummary = db.data.dailySummary || {};
+  const { scope } = await getUsageDbContext();
+  const history = scope.history || [];
+  const dailySummary = scope.dailySummary || {};
   const now = Date.now();
 
   // 24h: bucket by hour from live history

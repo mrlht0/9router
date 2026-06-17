@@ -1,44 +1,47 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
-import { Card, Button, Input, Modal, CardSkeleton, Toggle } from "@/shared/components";
+import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
-
-const TUNNEL_BENEFITS = [
-  { icon: "public", title: "Access Anywhere", desc: "Use your API from any network" },
-  { icon: "group", title: "Share Endpoint", desc: "Share URL with team members" },
-  { icon: "code", title: "Use in Cursor/Cline", desc: "Connect AI tools remotely" },
-  { icon: "lock", title: "Encrypted", desc: "End-to-end TLS via Cloudflare" },
-];
-
-const TUNNEL_PING_INTERVAL_MS = 2000;
-const TUNNEL_PING_MAX_MS = 300000;
-const STATUS_POLL_INTERVAL_MS = 5000;
-
-const CAVEMAN_LEVELS = [
-  { id: "lite", label: "Lite", desc: "Drop filler, keep grammar" },
-  { id: "full", label: "Full", desc: "Drop articles, fragments OK" },
-  { id: "ultra", label: "Ultra", desc: "Telegraphic, max compression" },
-];
+import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
+import {
+  WENYAN_LOCALES,
+  TUNNEL_BENEFITS,
+  TUNNEL_PING_INTERVAL_MS,
+  TUNNEL_PING_MAX_MS,
+  STATUS_POLL_FAST_MS,
+  REACHABLE_MISS_THRESHOLD,
+  CLIENT_PING_FAST_MS,
+  CAVEMAN_LEVELS,
+} from "./endpointConstants";
+import { clientPingUrl, clientPingAny } from "./endpointPing";
+import EndpointRow from "./components/EndpointRow";
+import StatusAlert from "./components/StatusAlert";
+import Tooltip from "./components/Tooltip";
+import SecurityWarning from "./components/SecurityWarning";
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [createdKey, setCreatedKey] = useState(null);
+  const [confirmState, setConfirmState] = useState(null);
 
   const [requireApiKey, setRequireApiKey] = useState(false);
   const [requireLogin, setRequireLogin] = useState(true);
   const [hasPassword, setHasPassword] = useState(true);
+  const [hasUsers, setHasUsers] = useState(false);
   const [tunnelDashboardAccess, setTunnelDashboardAccess] = useState(false);
   const [rtkEnabled, setRtkEnabledState] = useState(true);
   const [cavemanEnabled, setCavemanEnabled] = useState(false);
   const [cavemanLevel, setCavemanLevel] = useState("full");
+  const [locale, setLocale] = useState("en");
 
   // Cloudflare Tunnel state
   const [tunnelChecking, setTunnelChecking] = useState(true);
   const [tunnelEnabled, setTunnelEnabled] = useState(false);
+  const [tunnelReachable, setTunnelReachable] = useState(false);
   const [tunnelUrl, setTunnelUrl] = useState("");
   const [tunnelPublicUrl, setTunnelPublicUrl] = useState("");
   const [tunnelLoading, setTunnelLoading] = useState(false);
@@ -49,10 +52,13 @@ export default function APIPageClient({ machineId }) {
 
   // Tailscale state
   const [tsEnabled, setTsEnabled] = useState(false);
+  const [tsReachable, setTsReachable] = useState(false);
   const [tsUrl, setTsUrl] = useState("");
   const [tsLoading, setTsLoading] = useState(false);
   const [tsProgress, setTsProgress] = useState("");
   const [tsStatus, setTsStatus] = useState(null);
+  const [tsAuthUrl, setTsAuthUrl] = useState("");
+  const [tsAuthLabel, setTsAuthLabel] = useState("");
   const [tsInstalled, setTsInstalled] = useState(null); // null=checking, true/false
   const [tsInstalling, setTsInstalling] = useState(false);
   const [tsInstallLog, setTsInstallLog] = useState([]);
@@ -62,10 +68,58 @@ export default function APIPageClient({ machineId }) {
   const [showDisableTsModal, setShowDisableTsModal] = useState(false);
   const tsLogRef = useRef(null);
 
+  // Debounce reachable=false: server may briefly return false during background refresh.
+  // Only flip UI to "reconnecting" after N consecutive misses to avoid spinner flicker.
+  const tunnelMissRef = useRef(0);
+  const tsMissRef = useRef(0);
+  // Browser-side reachable cache (independent of backend DNS quirks)
+  const tunnelClientReachableRef = useRef(false);
+  const tsClientReachableRef = useRef(false);
+  // Track whether reachable=true was ever observed in this session.
+  // Distinguishes "Checking..." (initial cold cache) from "Reconnecting..." (lost connection).
+  const tunnelEverReachableRef = useRef(false);
+  const tsEverReachableRef = useRef(false);
+  const [tunnelEverReachable, setTunnelEverReachable] = useState(false);
+  const [tsEverReachable, setTsEverReachable] = useState(false);
+
   // API key visibility toggle state
   const [visibleKeys, setVisibleKeys] = useState(new Set());
 
+  // Client-side local/remote detection (UI hint only, not a security gate)
+  const [isRemoteHost, setIsRemoteHost] = useState(false);
+  useEffect(() => {
+    if (typeof window !== "undefined")
+      setIsRemoteHost(!["localhost", "127.0.0.1", "::1"].includes(window.location.hostname));
+  }, []);
+
+  // Track app UI locale to gate wenyan caveman levels
+  useEffect(() => {
+    setLocale(getCurrentLocale());
+    return onLocaleChange(() => setLocale(getCurrentLocale()));
+  }, []);
+
+  const isWenyanLocale = WENYAN_LOCALES.includes(locale);
+  const visibleCavemanLevels = isWenyanLocale
+    ? CAVEMAN_LEVELS
+    : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
+
+  // Reset wenyan level to "ultra" when leaving a Chinese locale
+  useEffect(() => {
+    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
+    if (current?.wenyan && !isWenyanLocale) {
+      setCavemanLevel("ultra");
+      patchSetting({ cavemanLevel: "ultra" });
+    }
+  }, [isWenyanLocale, cavemanLevel]);
+
   const { copied, copy } = useCopyToClipboard();
+
+  // Security gate: block remote exposure while dashboard sign-in is disabled or no local credential exists.
+  const hasCredentialProtection = hasPassword || hasUsers;
+  const isLoginUnsafe = !requireLogin || !hasCredentialProtection;
+  const unsafeReason = !requireLogin
+    ? "Enable \"Require login\" and keep dashboard sign-in protected before activating the tunnel."
+    : "Create a dashboard account or set a custom dashboard password before activating the tunnel.";
 
   // Auto-scroll install log
   useEffect(() => {
@@ -75,14 +129,74 @@ export default function APIPageClient({ machineId }) {
   useEffect(() => {
     fetchData();
     loadSettings();
-    // Poll status periodically + on tab visible to sync after watchdog restarts
-    const interval = setInterval(() => { syncTunnelStatus(); }, STATUS_POLL_INTERVAL_MS);
+  }, []);
+
+  // Status poll: only while degraded (not yet reachable). Stop once healthy to avoid spam.
+  // Visibility re-check: refresh once when tab becomes visible.
+  useEffect(() => {
+    const anyEnabled = tunnelEnabled || tsEnabled;
+    if (!anyEnabled) return;
+    const tunnelHealthy = !tunnelEnabled || tunnelReachable;
+    const tsHealthy = !tsEnabled || tsReachable;
+    const allHealthy = tunnelHealthy && tsHealthy;
     const onVisible = () => { if (!document.hidden) syncTunnelStatus(); };
     document.addEventListener("visibilitychange", onVisible);
+    if (allHealthy) return () => document.removeEventListener("visibilitychange", onVisible);
+    const timer = setInterval(() => { if (!document.hidden) syncTunnelStatus(); }, STATUS_POLL_FAST_MS);
     return () => {
-      clearInterval(interval);
+      clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
+  }, [tunnelEnabled, tsEnabled, tunnelReachable, tsReachable]);
+
+  // Browser-side periodic ping: probes tunnel/tailscale URLs directly so UI stays
+  // "reachable" even when backend DNS (1.1.1.1) hiccups on *.ts.net or *.trycloudflare.com.
+  // Adaptive: slow when healthy, fast when degraded; pause when tab hidden.
+  useEffect(() => {
+    const probeBoth = async () => {
+      if (document.hidden) return;
+      if (tunnelEnabled && (tunnelUrl || tunnelPublicUrl)) {
+        const ok = await clientPingAny(tunnelPublicUrl, tunnelUrl);
+        tunnelClientReachableRef.current = ok;
+        if (ok) { tunnelMissRef.current = 0; setTunnelReachable(true); if (!tunnelEverReachableRef.current) { tunnelEverReachableRef.current = true; setTunnelEverReachable(true); } }
+        else { tunnelMissRef.current += 1; if (tunnelMissRef.current >= REACHABLE_MISS_THRESHOLD) setTunnelReachable(false); }
+      } else {
+        tunnelClientReachableRef.current = false;
+      }
+      if (tsEnabled && tsUrl) {
+        const ok = await clientPingUrl(tsUrl);
+        tsClientReachableRef.current = ok;
+        if (ok) { tsMissRef.current = 0; setTsReachable(true); if (!tsEverReachableRef.current) { tsEverReachableRef.current = true; setTsEverReachable(true); } }
+        else { tsMissRef.current += 1; if (tsMissRef.current >= REACHABLE_MISS_THRESHOLD) setTsReachable(false); }
+      } else {
+        tsClientReachableRef.current = false;
+      }
+    };
+    const anyEnabled = (tunnelEnabled && (tunnelUrl || tunnelPublicUrl)) || (tsEnabled && tsUrl);
+    if (!anyEnabled) return;
+    probeBoth();
+    const tunnelHealthy = !tunnelEnabled || tunnelReachable;
+    const tsHealthy = !tsEnabled || tsReachable;
+    if (tunnelHealthy && tsHealthy) return;
+    const id = setInterval(probeBoth, CLIENT_PING_FAST_MS);
+    return () => clearInterval(id);
+  }, [tunnelEnabled, tunnelUrl, tunnelPublicUrl, tsEnabled, tsUrl, tunnelReachable, tsReachable]);
+
+  // Client-side reachable only (server no longer probes; watchdog handles backend health).
+  // Miss-debounce: only flip to false after N consecutive misses.
+  const updateReachable = useCallback((_unused, clientRef, missRef, setter, everRef, everSetter) => {
+    const reachable = clientRef.current;
+    if (reachable) {
+      missRef.current = 0;
+      setter(true);
+      if (!everRef.current) {
+        everRef.current = true;
+        everSetter(true);
+      }
+    } else {
+      missRef.current += 1;
+      if (missRef.current >= REACHABLE_MISS_THRESHOLD) setter(false);
+    }
   }, []);
 
   // Trust user intent (settingsEnabled): UI stays "enabled" while watchdog restarts process
@@ -93,15 +207,16 @@ export default function APIPageClient({ machineId }) {
       const data = await statusRes.json();
       const tEnabled = data.tunnel?.settingsEnabled ?? data.tunnel?.enabled ?? false;
       const tUrl = data.tunnel?.tunnelUrl || "";
-      const tPublicUrl = data.tunnel?.publicUrl || "";
       setTunnelUrl(tUrl);
-      setTunnelPublicUrl(tPublicUrl);
+      setTunnelPublicUrl(data.tunnel?.publicUrl || "");
       setTunnelEnabled(tEnabled);
+      updateReachable(null, tunnelClientReachableRef, tunnelMissRef, setTunnelReachable, tunnelEverReachableRef, setTunnelEverReachable);
 
       const tsEn = data.tailscale?.settingsEnabled ?? data.tailscale?.enabled ?? false;
       const tsUrlVal = data.tailscale?.tunnelUrl || "";
       setTsUrl(tsUrlVal);
       setTsEnabled(tsEn);
+      updateReachable(null, tsClientReachableRef, tsMissRef, setTsReachable, tsEverReachableRef, setTsEverReachable);
     } catch { /* ignore poll errors */ }
   };
 
@@ -112,13 +227,14 @@ export default function APIPageClient({ machineId }) {
         fetch("/api/settings"),
         fetch("/api/tunnel/status", { cache: "no-store" })
       ]);
-      if (settingsRes.ok) {
-        const data = await settingsRes.json();
-        setRequireApiKey(data.requireApiKey || false);
-        setRequireLogin(data.requireLogin !== false);
-        setHasPassword(data.hasPassword || false);
-        setTunnelDashboardAccess(data.tunnelDashboardAccess || false);
-        setRtkEnabledState(data.rtkEnabled !== false);
+        if (settingsRes.ok) {
+          const data = await settingsRes.json();
+          setRequireApiKey(data.requireApiKey || false);
+          setRequireLogin(data.requireLogin !== false);
+          setHasPassword(data.hasPassword || false);
+          setHasUsers(data.hasUsers === true);
+          setTunnelDashboardAccess(data.tunnelDashboardAccess || false);
+          setRtkEnabledState(data.rtkEnabled !== false);
         setCavemanEnabled(!!data.cavemanEnabled);
         setCavemanLevel(data.cavemanLevel || "full");
       }
@@ -126,29 +242,16 @@ export default function APIPageClient({ machineId }) {
         const data = await statusRes.json();
         const tEnabled = data.tunnel?.settingsEnabled ?? data.tunnel?.enabled ?? false;
         const tUrl = data.tunnel?.tunnelUrl || "";
-        const tPublicUrl = data.tunnel?.publicUrl || "";
         setTunnelUrl(tUrl);
-        setTunnelPublicUrl(tPublicUrl);
-        // Trust user intent: stays enabled while watchdog restores process
+        setTunnelPublicUrl(data.tunnel?.publicUrl || "");
         setTunnelEnabled(tEnabled);
+        updateReachable(null, tunnelClientReachableRef, tunnelMissRef, setTunnelReachable, tunnelEverReachableRef, setTunnelEverReachable);
 
         const tsEn = data.tailscale?.settingsEnabled ?? data.tailscale?.enabled ?? false;
         const tsUrlVal = data.tailscale?.tunnelUrl || "";
         setTsUrl(tsUrlVal);
         setTsEnabled(tsEn);
-
-        // Background reachability probes (non-blocking, only show warning)
-        if (tEnabled && (tPublicUrl || tUrl)) {
-          const healthUrl = `${tPublicUrl || tUrl}/api/health`;
-          fetch(healthUrl, { cache: "no-store" })
-            .then((r) => { if (!r.ok) setTunnelStatus({ type: "warning", message: "Tunnel reconnecting..." }); })
-            .catch(() => setTunnelStatus({ type: "warning", message: "Tunnel reconnecting..." }));
-        }
-        if (tsEn && tsUrlVal) {
-          fetch(`${tsUrlVal}/api/health`, { mode: "no-cors", cache: "no-store" })
-            .then((r) => { if (!(r.ok || r.type === "opaque")) setTsStatus({ type: "warning", message: "Tailscale reconnecting..." }); })
-            .catch(() => setTsStatus({ type: "warning", message: "Tailscale reconnecting..." }));
-        }
+        updateReachable(null, tsClientReachableRef, tsMissRef, setTsReachable, tsEverReachableRef, setTsEverReachable);
       }
     } catch (error) {
       console.log("Error loading settings:", error);
@@ -233,23 +336,25 @@ export default function APIPageClient({ machineId }) {
   };
 
   // u2500u2500u2500 Cloudflare Tunnel handlers
-  // Ping tunnel health until reachable, also check backend status to detect process die
-  const pingTunnelHealth = async (url) => {
+  // Ping tunnel health until reachable. Race multiple URLs (shortlink + direct) — 1 OK is enough.
+  const pingTunnelHealth = async (...urls) => {
     setTunnelLoading(true);
     setTunnelProgress("Waiting for tunnel ready...");
-    const healthUrl = `${url}/api/health`;
+    const targets = urls.filter(Boolean).map((u) => `${u}/api/health`);
     const start = Date.now();
     while (Date.now() - start < TUNNEL_PING_MAX_MS) {
       await new Promise((r) => setTimeout(r, TUNNEL_PING_INTERVAL_MS));
-      try {
-        const ping = await fetch(healthUrl, { mode: "no-cors", cache: "no-store" });
-        if (ping.ok || ping.type === "opaque") {
-          setTunnelEnabled(true);
-          setTunnelLoading(false);
-          setTunnelProgress("");
-          return true;
-        }
-      } catch { /* not ready yet */ }
+      const ok = await Promise.any(targets.map(async (h) => {
+        const p = await fetch(h, { mode: "cors", cache: "no-store" });
+        if (p.ok) return true;
+        throw new Error("not ready");
+      })).catch(() => false);
+      if (ok) {
+        setTunnelEnabled(true);
+        setTunnelLoading(false);
+        setTunnelProgress("");
+        return true;
+      }
       // Every 5 pings (~10s), check if backend process still alive
       if ((Date.now() - start) % 10000 < TUNNEL_PING_INTERVAL_MS) {
         try {
@@ -307,15 +412,15 @@ export default function APIPageClient({ machineId }) {
         return;
       }
 
-      const url = data.publicUrl || data.tunnelUrl;
+      const url = data.tunnelUrl;
       if (!url) {
         setTunnelStatus({ type: "error", message: "No tunnel URL returned" });
         return;
       }
 
-      setTunnelUrl(data.tunnelUrl || "");
+      setTunnelUrl(url);
       setTunnelPublicUrl(data.publicUrl || "");
-      await pingTunnelHealth(url);
+      await pingTunnelHealth(data.publicUrl, url);
     } catch (error) {
       setTunnelStatus({ type: "error", message: error.message });
     } finally {
@@ -334,7 +439,6 @@ export default function APIPageClient({ machineId }) {
       if (res.ok) {
         setTunnelEnabled(false);
         setTunnelUrl("");
-        setTunnelPublicUrl("");
         setShowDisableTunnelModal(false);
         setTunnelStatus({ type: "success", message: "Tunnel disabled" });
       } else {
@@ -400,6 +504,8 @@ export default function APIPageClient({ machineId }) {
           } else if (event === "done") {
             setTsInstalled(true);
             setTsInstalling(false);
+            setShowTsModal(false);
+            handleConnectTailscale();
             return;
           } else if (event === "error") {
             setTsStatus({ type: "error", message: data.error || "Install failed" });
@@ -428,36 +534,40 @@ export default function APIPageClient({ machineId }) {
     return false;
   };
 
-  const handleConnectTailscale = async (preOpenedTab) => {
-    const tab = preOpenedTab || null;
+  // Show inline login button instead of auto-opening popup (browsers block popups
+  // opened after async work because the user gesture is lost).
+  const requestUserAuth = (url, label) => {
+    setTsAuthUrl(url);
+    setTsAuthLabel(label);
+  };
+
+  const clearUserAuth = () => {
+    setTsAuthUrl("");
+    setTsAuthLabel("");
+  };
+
+  const handleConnectTailscale = async () => {
     setShowTsModal(false);
     setTsConnecting(true);
     setTsLoading(true);
     setTsStatus(null);
     setTsProgress("Connecting...");
+    clearUserAuth();
     try {
       const res = await fetch("/api/tunnel/tailscale-enable", { method: "POST" });
       const data = await res.json();
 
       if (res.ok && data.success) {
-        if (tab) tab.close();
         setTsUrl(data.tunnelUrl || "");
         const reachable = await pingTsHealth(data.tunnelUrl);
-        if (reachable) {
-          setTsEnabled(true);
-          setTsStatus(null);
-        } else {
-          setTsEnabled(true);
-          setTsStatus({ type: "warning", message: "Connected but not reachable yet." });
-        }
+        setTsEnabled(true);
+        setTsStatus(reachable ? null : { type: "warning", message: "Connected but not reachable yet." });
         return;
       }
 
-      // Needs login: redirect pre-opened tab or open new
       if (data.needsLogin && data.authUrl) {
-        if (tab) tab.location.href = data.authUrl;
-        else window.open(data.authUrl, "tailscale_auth", "width=600,height=700");
-        setTsProgress("Waiting for login...");
+        requestUserAuth(data.authUrl, "Open Login Page");
+        setTsProgress("Login required — click \"Open Login Page\" to continue");
         for (let i = 0; i < 40; i++) {
           await new Promise((r) => setTimeout(r, 3000));
           try {
@@ -465,22 +575,17 @@ export default function APIPageClient({ machineId }) {
             if (r2.ok) {
               const check = await r2.json();
               if (check.loggedIn) {
+                clearUserAuth();
                 setTsProgress("Starting funnel...");
                 const res2 = await fetch("/api/tunnel/tailscale-enable", { method: "POST" });
                 const data2 = await res2.json();
                 if (res2.ok && data2.success) {
-                  if (tab) tab.close();
                   setTsUrl(data2.tunnelUrl || "");
                   const ok2 = await pingTsHealth(data2.tunnelUrl);
-                  if (ok2) {
-                    setTsEnabled(true);
-                    setTsStatus(null);
-                  } else {
-                    setTsEnabled(true);
-                    setTsStatus({ type: "warning", message: "Connected but not reachable yet." });
-                  }
+                  setTsEnabled(true);
+                  setTsStatus(ok2 ? null : { type: "warning", message: "Connected but not reachable yet." });
                 } else if (data2.funnelNotEnabled && data2.enableUrl) {
-                  await pollFunnelEnable(data2.enableUrl, tab);
+                  await pollFunnelEnable(data2.enableUrl);
                 } else {
                   setTsStatus({ type: "error", message: data2.error || "Failed to start funnel" });
                 }
@@ -489,57 +594,52 @@ export default function APIPageClient({ machineId }) {
             }
           } catch { /* retry */ }
         }
+        clearUserAuth();
         setTsStatus({ type: "error", message: "Login timed out. Please try again." });
         return;
       }
 
-      // Funnel not enabled: redirect pre-opened tab
       if (data.funnelNotEnabled && data.enableUrl) {
-        await pollFunnelEnable(data.enableUrl, tab);
+        await pollFunnelEnable(data.enableUrl);
         return;
       }
 
-      if (tab) tab.close();
       setTsStatus({ type: "error", message: data.error || "Failed to connect" });
     } catch (error) {
-      if (tab) tab.close();
       setTsStatus({ type: "error", message: error.message });
     } finally {
       setTsLoading(false);
       setTsConnecting(false);
       setTsProgress("");
+      clearUserAuth();
     }
   };
 
-  const pollFunnelEnable = async (enableUrl, tab) => {
-    if (tab) tab.location.href = enableUrl;
-    else window.open(enableUrl, "tailscale_auth", "width=600,height=700");
-    setTsProgress("Enable Funnel in browser, waiting...");
+  const pollFunnelEnable = async (enableUrl) => {
+    requestUserAuth(enableUrl, "Open Funnel Settings");
+    setTsProgress("Click \"Open Funnel Settings\" to enable Funnel...");
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 3000));
       try {
         const res = await fetch("/api/tunnel/tailscale-enable", { method: "POST" });
         const data = await res.json();
         if (res.ok && data.success) {
-          if (tab) tab.close();
+          clearUserAuth();
           setTsUrl(data.tunnelUrl || "");
           const ok3 = await pingTsHealth(data.tunnelUrl);
-          if (ok3) {
-            setTsEnabled(true);
-            setTsStatus(null);
-          } else {
-            setTsEnabled(true);
-            setTsStatus({ type: "warning", message: "Connected but not reachable yet." });
-          }
+          setTsEnabled(true);
+          setTsStatus(ok3 ? null : { type: "warning", message: "Connected but not reachable yet." });
           return;
         }
         if (data.funnelNotEnabled) continue;
         if (data.error) {
+          clearUserAuth();
           setTsStatus({ type: "error", message: data.error });
           return;
         }
       } catch { /* retry */ }
     }
+    clearUserAuth();
     setTsStatus({ type: "error", message: "Timed out waiting for Funnel to be enabled." });
   };
 
@@ -567,8 +667,12 @@ export default function APIPageClient({ machineId }) {
   const handleOpenTsModal = async () => {
     setTsStatus(null);
     setTsInstallLog([]);
-    setShowTsModal(true);
-    await checkTailscaleInstalled();
+    const data = await checkTailscaleInstalled();
+    if (data?.installed && data?.hasCachedPassword) {
+      handleConnectTailscale();
+    } else {
+      setShowTsModal(true);
+    }
   };
 
   const handleCreateKey = async () => {
@@ -594,22 +698,26 @@ export default function APIPageClient({ machineId }) {
   };
 
   const handleDeleteKey = async (id) => {
-    if (!confirm("Delete this API key?")) return;
-
-    try {
-      const res = await fetch(`/api/keys/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        setKeys(keys.filter((k) => k.id !== id));
-        // Clean up visibility state
-        setVisibleKeys(prev => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
+    setConfirmState({
+      title: "Delete API Key",
+      message: "Delete this API key?",
+      onConfirm: async () => {
+        setConfirmState(null);
+        try {
+          const res = await fetch(`/api/keys/${id}`, { method: "DELETE" });
+          if (res.ok) {
+            setKeys(keys.filter((k) => k.id !== id));
+            setVisibleKeys(prev => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+          }
+        } catch (error) {
+          console.log("Error deleting key:", error);
+        }
       }
-    } catch (error) {
-      console.log("Error deleting key:", error);
-    }
+    });
   };
 
   const handleToggleKey = async (id, isActive) => {
@@ -628,8 +736,8 @@ export default function APIPageClient({ machineId }) {
   };
 
   const maskKey = (fullKey) => {
-    if (!fullKey) return "";
-    return fullKey.length > 8 ? fullKey.slice(0, 8) + "..." : fullKey;
+    if (!fullKey || fullKey.length <= 10) return fullKey || "";
+    return fullKey.slice(0, 6) + "•".repeat(fullKey.length - 10) + fullKey.slice(-4);
   };
 
   const toggleKeyVisibility = (keyId) => {
@@ -685,7 +793,7 @@ export default function APIPageClient({ machineId }) {
             <span className={`text-xs font-mono px-1.5 py-0.5 rounded shrink-0 min-w-[88px] text-center ${
               tunnelEnabled ? "bg-primary/10 text-primary" : "bg-surface-2 text-text-muted"
             }`}>Tunnel</span>
-            {tunnelEnabled && !tunnelLoading ? (
+            {tunnelEnabled && !tunnelLoading && tunnelReachable ? (
               <>
                 <Input value={`${tunnelPublicUrl || tunnelUrl}/v1`} readOnly className="flex-1 font-mono text-sm" />
                 <button
@@ -694,6 +802,20 @@ export default function APIPageClient({ machineId }) {
                 >
                   <span className="material-symbols-outlined text-[18px]">{copied === "tunnel_url" ? "check" : "content_copy"}</span>
                 </button>
+                <button
+                  onClick={() => setShowDisableTunnelModal(true)}
+                  className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
+                  title="Disable Tunnel"
+                >
+                  <span className="material-symbols-outlined text-[18px]">power_settings_new</span>
+                </button>
+              </>
+            ) : tunnelEnabled && !tunnelLoading && !tunnelReachable ? (
+              <>
+                <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded border border-amber-300 dark:border-amber-800 bg-amber-500/5 text-sm text-amber-600 dark:text-amber-400">
+                  <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
+                  {tunnelEverReachable ? "Tunnel reconnecting..." : "Tunnel checking..."}
+                </div>
                 <button
                   onClick={() => setShowDisableTunnelModal(true)}
                   className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
@@ -743,6 +865,10 @@ export default function APIPageClient({ machineId }) {
                 size="sm"
                 icon="cloud_upload"
                 onClick={() => {
+                  if (isLoginUnsafe) {
+                    setTunnelStatus({ type: "error", message: `Security required: ${unsafeReason}` });
+                    return;
+                  }
                   if (!requireApiKey) {
                     setTunnelStatus({ type: "error", message: "Security required: Enable \"Require API key\" before activating the tunnel." });
                     return;
@@ -759,7 +885,7 @@ export default function APIPageClient({ machineId }) {
             <span className={`text-xs font-mono px-1.5 py-0.5 rounded shrink-0 min-w-[88px] text-center ${
               tsEnabled ? "bg-primary/10 text-primary" : "bg-surface-2 text-text-muted"
             }`}>Tailscale</span>
-            {tsEnabled && !tsLoading ? (
+            {tsEnabled && !tsLoading && tsReachable ? (
               <>
                 <Input value={`${tsUrl}/v1`} readOnly className="flex-1 font-mono text-sm" />
                 <button
@@ -776,14 +902,37 @@ export default function APIPageClient({ machineId }) {
                   <span className="material-symbols-outlined text-[18px]">power_settings_new</span>
                 </button>
               </>
+            ) : tsEnabled && !tsLoading && !tsReachable ? (
+              <>
+                <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded border border-amber-300 dark:border-amber-800 bg-amber-500/5 text-sm text-amber-600 dark:text-amber-400">
+                  <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
+                  {tsEverReachable ? "Tailscale reconnecting..." : "Tailscale checking..."}
+                </div>
+                <button
+                  onClick={() => setShowDisableTsModal(true)}
+                  className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
+                  title="Disable Tailscale"
+                >
+                  <span className="material-symbols-outlined text-[18px]">power_settings_new</span>
+                </button>
+              </>
             ) : (tsLoading || tsConnecting) ? (
               <>
                 <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded border border-border bg-input text-sm text-text-muted">
                   <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
                   {tsProgress || "Connecting..."}
                 </div>
+                {tsAuthUrl && (
+                  <Button
+                    size="sm"
+                    icon="open_in_new"
+                    onClick={() => window.open(tsAuthUrl, "tailscale_auth", "width=600,height=700,noopener,noreferrer")}
+                  >
+                    {tsAuthLabel || "Open"}
+                  </Button>
+                )}
                 <button
-                  onClick={() => { setTsLoading(false); setTsConnecting(false); setTsProgress(""); }}
+                  onClick={() => { setTsLoading(false); setTsConnecting(false); setTsProgress(""); clearUserAuth(); }}
                   className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
                   title="Stop"
                 >
@@ -802,7 +951,13 @@ export default function APIPageClient({ machineId }) {
               <Button
                 size="sm"
                 icon="vpn_lock"
-                onClick={handleOpenTsModal}
+                onClick={() => {
+                  if (isLoginUnsafe) {
+                    setTsStatus({ type: "error", message: `Security required: ${unsafeReason}` });
+                    return;
+                  }
+                  handleOpenTsModal();
+                }}
                 className="bg-linear-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white!"
               >
                 Enable
@@ -810,6 +965,16 @@ export default function APIPageClient({ machineId }) {
             )}
           </div>
         </div>
+
+        {/* Pre-enable security gate banner */}
+        {isLoginUnsafe && !tunnelEnabled && !tsEnabled && (
+          <div className="mt-4">
+            <SecurityWarning
+              message={unsafeReason}
+              action={{ label: "Open settings", href: "/dashboard/profile" }}
+            />
+          </div>
+        )}
 
         {/* Security warnings when tunnel or tailscale is active */}
         {(tunnelEnabled || tsEnabled) && (
@@ -820,15 +985,15 @@ export default function APIPageClient({ machineId }) {
                 action={{ label: "Enable", href: "#require-api-key" }}
               />
             )}
-            {(!requireLogin || !hasPassword) && (
+            {(!requireLogin || !hasCredentialProtection) && (
               <SecurityWarning
                 message={
                   !requireLogin
                     ? "Require login is disabled — anyone can access your dashboard via tunnel."
-                    : "Dashboard uses the default password — change it in Profile settings."
+                    : "Dashboard does not have a configured local credential yet — set one in Profile settings."
                 }
                 action={{
-                  label: !requireLogin ? "Enable" : "Change password",
+                  label: !requireLogin ? "Enable" : "Open profile",
                   href: "/dashboard/profile",
                 }}
               />
@@ -900,21 +1065,26 @@ export default function APIPageClient({ machineId }) {
           </div>
           <div className="flex items-center gap-3 shrink-0">
             {cavemanEnabled && (
-              <div className="flex items-center gap-1.5">
-                {CAVEMAN_LEVELS.map((lvl) => (
-                  <button
-                    key={lvl.id}
-                    onClick={() => handleCavemanLevel(lvl.id)}
-                    className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
-                      cavemanLevel === lvl.id
-                        ? "bg-primary text-white border-primary"
-                        : "bg-transparent border-border text-text-muted hover:bg-surface-2"
-                    }`}
-                    title={lvl.desc}
-                  >
-                    {lvl.label}
-                  </button>
-                ))}
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-1.5">
+                  {visibleCavemanLevels.map((lvl) => (
+                    <button
+                      key={lvl.id}
+                      onClick={() => handleCavemanLevel(lvl.id)}
+                      className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
+                        cavemanLevel === lvl.id
+                          ? "bg-primary text-white border-primary"
+                          : "bg-transparent border-border text-text-muted hover:bg-surface-2"
+                      }`}
+                      title={lvl.desc}
+                    >
+                      {lvl.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-primary">
+                  {CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel)?.desc}
+                </p>
               </div>
             )}
             <Toggle
@@ -950,6 +1120,12 @@ export default function APIPageClient({ machineId }) {
           />
         </div>
 
+        {isRemoteHost && !requireApiKey && (
+          <div className="mb-4 -mt-2">
+            <SecurityWarning message="Endpoint is exposed without an API key." />
+          </div>
+        )}
+
         {keys.length === 0 ? (
           <div className="text-center py-12">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 text-primary mb-4">
@@ -976,7 +1152,7 @@ export default function APIPageClient({ machineId }) {
                     </code>
                     <button
                       onClick={() => toggleKeyVisibility(key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary opacity-0 group-hover:opacity-100 transition-all"
+                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
                       title={visibleKeys.has(key.id) ? "Hide key" : "Show key"}
                     >
                       <span className="material-symbols-outlined text-[14px]">
@@ -985,7 +1161,7 @@ export default function APIPageClient({ machineId }) {
                     </button>
                     <button
                       onClick={() => copy(key.key, key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary opacity-0 group-hover:opacity-100 transition-all"
+                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
                     >
                       <span className="material-symbols-outlined text-[14px]">
                         {copied === key.id ? "check" : "content_copy"}
@@ -1005,9 +1181,14 @@ export default function APIPageClient({ machineId }) {
                     checked={key.isActive ?? true}
                     onChange={(checked) => {
                       if (key.isActive && !checked) {
-                        if (confirm(`Pause API key "${key.name}"?\n\nThis key will stop working immediately but can be resumed later.`)) {
-                          handleToggleKey(key.id, checked);
-                        }
+                        setConfirmState({
+                          title: "Pause API Key",
+                          message: `Pause API key "${key.name}"?\n\nThis key will stop working immediately but can be resumed later.`,
+                          onConfirm: async () => {
+                            setConfirmState(null);
+                            handleToggleKey(key.id, checked);
+                          }
+                        });
                       } else {
                         handleToggleKey(key.id, checked);
                       }
@@ -1016,7 +1197,7 @@ export default function APIPageClient({ machineId }) {
                   />
                   <button
                     onClick={() => handleDeleteKey(key.id)}
-                    className="p-2 hover:bg-red-500/10 rounded text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                    className="p-2 hover:bg-red-500/10 rounded text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
                   >
                     <span className="material-symbols-outlined text-[18px]">delete</span>
                   </button>
@@ -1211,11 +1392,7 @@ export default function APIPageClient({ machineId }) {
               </div>
               <div className="flex gap-2">
                 <Button
-                  onClick={() => {
-                    const tab = window.open("", "tailscale_auth", "width=600,height=700");
-                    if (tab) tab.document.write("<p style='font-family:sans-serif;text-align:center;margin-top:40px'>Connecting to Tailscale...</p>");
-                    handleConnectTailscale(tab);
-                  }}
+                  onClick={() => handleConnectTailscale()}
                   fullWidth
                 >
                   Connect
@@ -1245,85 +1422,20 @@ export default function APIPageClient({ machineId }) {
           </div>
         </div>
       </Modal>
+
+      {/* Confirm Modal */}
+      <ConfirmModal
+        isOpen={!!confirmState}
+        onClose={() => setConfirmState(null)}
+        onConfirm={confirmState?.onConfirm}
+        title={confirmState?.title || "Confirm"}
+        message={confirmState?.message}
+        variant="danger"
+      />
     </div>
   );
 }
 
-/** Reusable endpoint row component */
-function EndpointRow({ label, url, copyId, copied, onCopy, badge, actions }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className={`text-xs font-mono px-1.5 py-0.5 rounded shrink-0 min-w-[88px] text-center ${
-          (badge === "CF" || badge === "TS") ? "bg-primary/10 text-primary" : "bg-surface-2 text-text-muted"
-        }`}>{label}</span>
-      <Input value={url} readOnly className="flex-1 font-mono text-sm" />
-      <button
-        onClick={() => onCopy(url, copyId)}
-        className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-colors shrink-0"
-      >
-        <span className="material-symbols-outlined text-[18px]">{copied === copyId ? "check" : "content_copy"}</span>
-      </button>
-      {actions}
-    </div>
-  );
-}
-
-/** Reusable status alert */
-function StatusAlert({ status, className = "" }) {
-  // Render URLs in message as clickable links
-  const renderMessage = (msg) => {
-    const parts = msg.split(/(https?:\/\/[^\s]+)/g);
-    return parts.map((part, i) =>
-      /^https?:\/\//.test(part)
-        ? <a key={i} href={part} target="_blank" rel="noreferrer" className="underline font-medium">{part}</a>
-        : part
-    );
-  };
-
-  return (
-    <div className={`p-2 rounded text-sm ${className} ${status.type === "success" ? "bg-green-500/10 text-green-600 dark:text-green-400" :
-        status.type === "warning" ? "bg-yellow-500/10 text-yellow-600 dark:text-yellow-400" :
-        status.type === "info" ? "bg-blue-500/10 text-blue-600 dark:text-blue-400" :
-          "bg-red-500/10 text-red-600 dark:text-red-400"
-      }`}>
-      {renderMessage(status.message)}
-    </div>
-  );
-}
-
-/** Inline tooltip, Claude Code CLI style */
-function Tooltip({ text }) {
-  return (
-    <span className="relative group inline-flex items-center">
-      <span className="material-symbols-outlined text-[14px] text-text-muted cursor-help">help</span>
-      <span className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 z-50 w-64 rounded bg-gray-900 dark:bg-gray-800 text-white text-xs px-2.5 py-1.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg">
-        {text}
-      </span>
-    </span>
-  );
-}
-
-/** Security warning banner with optional action link */
-function SecurityWarning({ message, action }) {
-  return (
-    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-400">
-      <span className="material-symbols-outlined text-[16px] shrink-0 mt-0.5">warning</span>
-      <p className="text-xs flex-1">{message}</p>
-      {action && (
-        <a
-          href={action.href}
-          className="text-xs font-medium underline shrink-0 hover:opacity-80"
-          onClick={action.href.startsWith("#") ? (e) => {
-            e.preventDefault();
-            document.getElementById(action.href.slice(1))?.scrollIntoView({ behavior: "smooth" });
-          } : undefined}
-        >
-          {action.label}
-        </a>
-      )}
-    </div>
-  );
-}
 
 APIPageClient.propTypes = {
   machineId: PropTypes.string.isRequired,

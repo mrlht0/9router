@@ -1,4 +1,4 @@
-import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/models";
+import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelKind } from "@/shared/constants/models";
 import {
   AI_PROVIDERS,
   getProviderAlias,
@@ -7,6 +7,42 @@ import {
 } from "@/shared/constants/providers";
 import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { resolveKiroModels } from "open-sse/services/kiroModels.js";
+import { resolveQoderModels } from "open-sse/services/qoderModels.js";
+import { runWithApiKeyScope } from "@/sse/services/auth.js";
+
+function extractApiKey(request) {
+  const authHeader = request?.headers?.get?.("Authorization");
+  if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
+  return request?.headers?.get?.("x-api-key") || null;
+}
+
+// Per-provider live model resolvers. Each receives a connection record and
+// returns { models: [{ id, name? }, ...] } | null on failure.
+// Adding a provider here makes /v1/models prefer the live catalog for it.
+const LIVE_MODEL_RESOLVERS = {
+  kiro: async (conn) => {
+    const result = await resolveKiroModels({
+      accessToken: conn.accessToken,
+      refreshToken: conn.refreshToken,
+      providerSpecificData: conn.providerSpecificData || {}
+    }, { log: console });
+    return result?.models?.length ? { models: result.models } : null;
+  },
+  qoder: async (conn) => {
+    const result = await resolveQoderModels({
+      accessToken: conn.accessToken,
+      refreshToken: conn.refreshToken,
+      email: conn.email,
+      displayName: conn.displayName,
+      providerSpecificData: conn.providerSpecificData || {}
+    });
+    if (!result?.models?.length) return null;
+    return {
+      models: result.models.map((m) => ({ id: m.id, name: m.name })),
+    };
+  }
+};
 
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
@@ -30,8 +66,9 @@ const MODEL_TYPE_TO_KIND = {
 };
 
 function modelKind(model) {
-  if (!model?.type) return LLM_KIND;
-  return MODEL_TYPE_TO_KIND[model.type] || LLM_KIND;
+  const k = model?.kind || model?.type;
+  if (!k) return LLM_KIND;
+  return MODEL_TYPE_TO_KIND[k] || LLM_KIND;
 }
 
 // For dynamic/unknown model IDs (compatible providers, alias map, custom models)
@@ -254,6 +291,21 @@ export async function buildModelsList(kindFilter) {
         rawModelIds = await fetchCompatibleModelIds(conn);
       }
 
+      // Config-driven live catalog override (e.g. Kiro returns dynamic
+      // -thinking/-agentic variants per account). On failure, fall back to
+      // whatever rawModelIds already holds.
+      const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
+      if (liveResolver && !hasExplicitEnabledModels) {
+        try {
+          const live = await liveResolver(conn);
+          if (live?.models?.length) {
+            rawModelIds = live.models.map((m) => m.id);
+          }
+        } catch (err) {
+          console.log(`Live model fetch failed for ${providerId}: ${err?.message || err}`);
+        }
+      }
+
       const modelIds = rawModelIds
         .map((modelId) => {
           if (modelId.startsWith(`${outputAlias}/`)) {
@@ -271,7 +323,7 @@ export async function buildModelsList(kindFilter) {
 
       const customModelIds = customModels
         .filter((m) => {
-          if (!m?.id || (m.type && m.type !== "llm")) return false;
+          if (!m?.id || (getModelKind(m) && getModelKind(m) !== "llm")) return false;
           const alias = m.providerAlias;
           return alias === staticAlias || alias === outputAlias || alias === providerId;
         })
@@ -316,29 +368,8 @@ export async function buildModelsList(kindFilter) {
         });
       }
 
-      // Merge sub-config models (TTS / embedding) that live on AI_PROVIDERS, not PROVIDER_MODELS
-      const providerInfo = AI_PROVIDERS[providerId];
-      const subConfigModels = [];
-      if (kindFilter.includes("tts") && Array.isArray(providerInfo?.ttsConfig?.models)) {
-        for (const m of providerInfo.ttsConfig.models) {
-          if (m?.id) subConfigModels.push(m.id);
-        }
-      }
-      if (kindFilter.includes("embedding") && Array.isArray(providerInfo?.embeddingConfig?.models)) {
-        for (const m of providerInfo.embeddingConfig.models) {
-          if (m?.id) subConfigModels.push(m.id);
-        }
-      }
-      for (const subId of subConfigModels) {
-        if (isDisabled(outputAlias, subId) || isDisabled(staticAlias, subId)) continue;
-        models.push({
-          id: `${outputAlias}/${subId}`,
-          object: "model",
-          owned_by: outputAlias,
-        });
-      }
-
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind
+      const providerInfo = AI_PROVIDERS[providerId];
       if (kindFilter.includes("webSearch") && providerInfo?.searchConfig) {
         models.push({
           id: `${outputAlias}/search`,
@@ -386,9 +417,12 @@ export async function OPTIONS() {
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  */
-export async function GET() {
+export async function GET(request) {
   try {
-    const data = await buildModelsList([LLM_KIND]);
+    const apiKey = extractApiKey(request);
+    const data = await (apiKey
+      ? runWithApiKeyScope(apiKey, () => buildModelsList([LLM_KIND]))
+      : buildModelsList([LLM_KIND]));
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
