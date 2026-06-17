@@ -5,7 +5,6 @@ import { cookies } from "next/headers";
 import { setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
 import { isOidcConfigured } from "@/lib/auth/oidc";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
-import { isLocalRequest } from "@/dashboardGuard";
 
 const RESET_HINT = "Forgot password? Reset to default via 9Router CLI → Settings → Reset Password to Default.";
 
@@ -41,32 +40,30 @@ export async function POST(request) {
       return NextResponse.json({ error: "Password login is disabled. Use OIDC sign in." }, { status: 403 });
     }
 
-    const storedHash = settings.password;
+    if (!hasUsers) {
+      return NextResponse.json({ error: "No account exists yet. Please register first." }, { status: 403 });
+    }
+
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!normalizedEmail) {
+      return NextResponse.json({ error: "Email is required" }, { status: 400 });
+    }
+    if (typeof password !== "string" || password.length === 0) {
+      return NextResponse.json({ error: "Password is required" }, { status: 400 });
+    }
+
     let isValid = false;
     let authClaims = {};
-    if (hasUsers) {
-      const normalizedEmail = String(email || "").trim().toLowerCase();
-      if (!normalizedEmail) {
-        return NextResponse.json({ error: "Email is required" }, { status: 400 });
-      }
-      const user = await getUserByEmail(normalizedEmail);
-      if (user?.isActive !== false && user?.passwordHash) {
-        isValid = await bcrypt.compare(password, user.passwordHash);
-        if (isValid) {
-          authClaims = {
-            userId: user.id,
-            userEmail: user.email,
-            loginMethod: "email-password",
-          };
-          await updateUser(user.id, { lastLoginAt: new Date().toISOString() });
-        }
-      }
-    } else {
-      if (storedHash) {
-        isValid = await bcrypt.compare(password, storedHash);
-      } else {
-        const initialPassword = process.env.INITIAL_PASSWORD || "123456";
-        isValid = password === initialPassword;
+    const user = await getUserByEmail(normalizedEmail);
+    if (user?.isActive !== false && user?.passwordHash) {
+      isValid = await bcrypt.compare(password, user.passwordHash);
+      if (isValid) {
+        authClaims = {
+          userId: user.id,
+          userEmail: user.email,
+          loginMethod: "email-password",
+        };
+        await updateUser(user.id, { lastLoginAt: new Date().toISOString() });
       }
     }
 
@@ -74,13 +71,7 @@ export async function POST(request) {
       recordSuccess(ip);
       const cookieStore = await cookies();
       await setDashboardAuthCookie(cookieStore, request, authClaims);
-
-      // Default password still in use on a remote client → force a password
-      // change before the dashboard is exposed remotely (keeps local UX intact).
-      const mustChangePassword =
-        !hasUsers && !storedHash && !process.env.INITIAL_PASSWORD && !isLocalRequest(request);
-
-      return NextResponse.json({ success: true, mustChangePassword, hasUsers });
+      return NextResponse.json({ success: true, hasUsers });
     }
 
     const { remainingBeforeLock } = recordFail(ip);

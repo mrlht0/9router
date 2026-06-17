@@ -1,410 +1,363 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Card, Button, Input } from "@/shared/components";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Button, Card, Input } from "@/shared/components";
+
+const LOGIN_VIEW = "login";
+const REGISTER_VIEW = "register";
 
 export default function LoginPage() {
-  const [view, setView] = useState("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [registerPassword, setRegisterPassword] = useState("");
-  const [registerConfirm, setRegisterConfirm] = useState("");
+  const router = useRouter();
+  const [view, setView] = useState(LOGIN_VIEW);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const [resetHint, setResetHint] = useState("");
   const [retryAfter, setRetryAfter] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [hasPassword, setHasPassword] = useState(null);
-  const [hasUsers, setHasUsers] = useState(false);
   const [allowRegistration, setAllowRegistration] = useState(false);
+  const [hasUsers, setHasUsers] = useState(false);
   const [authMode, setAuthMode] = useState("password");
   const [oidcConfigured, setOidcConfigured] = useState(false);
   const [oidcLoginLabel, setOidcLoginLabel] = useState("Sign in with OIDC");
-  const [mustChange, setMustChange] = useState(false);
-  const [newPassword, setNewPassword] = useState("");
-  const router = useRouter();
+  const [loginForm, setLoginForm] = useState({ email: "", password: "" });
+  const [registerForm, setRegisterForm] = useState({ email: "", password: "", confirmPassword: "" });
 
-  // Countdown for rate-limit
   useEffect(() => {
     if (retryAfter <= 0) return;
-    const id = setInterval(() => setRetryAfter((s) => (s > 0 ? s - 1 : 0)), 1000);
+    const id = setInterval(() => setRetryAfter((value) => (value > 0 ? value - 1 : 0)), 1000);
     return () => clearInterval(id);
   }, [retryAfter]);
 
   useEffect(() => {
-    async function checkAuth() {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-      const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
-
+    async function loadStatus() {
       try {
-        const res = await fetch(`${baseUrl}/api/auth/status`, {
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const data = await res.json();
-          if (data.requireLogin === false) {
-            router.push("/dashboard");
-            router.refresh();
-            return;
-          }
-          setHasPassword(!!data.hasPassword);
-          setHasUsers(data.hasUsers === true);
-          setAllowRegistration(data.allowRegistration === true);
-          setAuthMode(data.authMode || "password");
-          setOidcConfigured(data.oidcConfigured === true);
-          setOidcLoginLabel(data.oidcLoginLabel || "Sign in with OIDC");
-          setView(data.allowRegistration === true ? "register" : "login");
-        } else {
-          // Safe fallback on non-OK response to avoid infinite loading state.
-          setHasPassword(true);
+        const res = await fetch("/api/auth/status");
+        if (!res.ok) throw new Error("Failed to load auth status");
+        const data = await res.json();
+        if (data.requireLogin === false) {
+          router.push("/dashboard");
+          router.refresh();
+          return;
         }
-      } catch (err) {
-        clearTimeout(timeoutId);
-        setHasPassword(true);
+        const usersExist = data.hasUsers === true;
+        const canRegister = data.allowRegistration === true;
+        setHasUsers(usersExist);
+        setAllowRegistration(canRegister);
+        setAuthMode(data.authMode || "password");
+        setOidcConfigured(data.oidcConfigured === true);
+        setOidcLoginLabel(data.oidcLoginLabel || "Sign in with OIDC");
+        setView(usersExist ? LOGIN_VIEW : canRegister ? REGISTER_VIEW : LOGIN_VIEW);
+      } catch {
+        setHasUsers(false);
+        setAllowRegistration(true);
+        setView(REGISTER_VIEW);
+      } finally {
+        setLoading(false);
       }
     }
-    checkAuth();
+    loadStatus();
   }, [router]);
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError("");
-    setResetHint("");
+  const oidcAvailable = oidcConfigured && ["oidc", "both"].includes(authMode);
+  const passwordAvailable = authMode !== "oidc" || !oidcConfigured;
+  const canShowRegister = allowRegistration && !hasUsers;
 
+  function switchView(nextView) {
+    setError("");
+    setRetryAfter(0);
+    setView(nextView);
+  }
+
+  function updateLoginField(key, value) {
+    setLoginForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateRegisterField(key, value) {
+    setRegisterForm((current) => ({ ...current, [key]: value }));
+  }
+
+  async function handleLogin(event) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(loginForm),
       });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.mustChangePassword) {
-          setMustChange(true);
-          return;
-        }
-        router.push("/dashboard");
-        router.refresh();
-      } else {
-        const data = await res.json();
-        setError(data.error || "Invalid password");
-        if (data.resetHint) setResetHint(data.resetHint);
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Unable to sign in.");
         if (data.retryAfter) setRetryAfter(Number(data.retryAfter));
+        return;
       }
-    } catch (err) {
-      setError("An error occurred. Please try again.");
+      router.push("/dashboard");
+      router.refresh();
+    } catch {
+      setError("Unable to sign in right now.");
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
-  };
+  }
 
-  const handleRegister = async (e) => {
-    e.preventDefault();
-    if (registerPassword !== registerConfirm) {
+  async function handleRegister(event) {
+    event.preventDefault();
+    setError("");
+    if (registerForm.password !== registerForm.confirmPassword) {
       setError("Passwords do not match.");
       return;
     }
-
-    setLoading(true);
-    setError("");
-    setResetHint("");
-
+    setSubmitting(true);
     try {
       const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password: registerPassword }),
+        body: JSON.stringify({
+          email: registerForm.email,
+          password: registerForm.password,
+        }),
       });
-
-      if (res.ok) {
-        router.push("/dashboard");
-        router.refresh();
-      } else {
-        const data = await res.json();
-        setError(data.error || "Registration failed");
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Unable to create account.");
+        return;
       }
+      router.push("/dashboard");
+      router.refresh();
     } catch {
-      setError("An error occurred. Please try again.");
+      setError("Unable to create account right now.");
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
-  };
+  }
 
-  // Force a new password before entering the dashboard (default + remote).
-  const handleSetNewPassword = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError("");
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ currentPassword: password, newPassword }),
-      });
-      if (res.ok) {
-        router.push("/dashboard");
-        router.refresh();
-      } else {
-        const data = await res.json();
-        setError(data.error || "Failed to set password");
-      }
-    } catch (err) {
-      setError("An error occurred. Please try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleOidcLogin = () => {
+  function handleOidcLogin() {
     window.location.href = "/api/auth/oidc/start";
-  };
+  }
 
-  const oidcAvailable = oidcConfigured && ["oidc", "both"].includes(authMode);
-  const passwordAvailable = authMode !== "oidc" || !oidcConfigured;
-  const useUserAccounts = hasUsers;
-  const showRegister = allowRegistration && !hasUsers;
-  const showRegisterView = showRegister && view === "register";
-  const showLoginView = view === "login" || !showRegister;
-
-  const switchView = (nextView) => {
-    setError("");
-    setResetHint("");
-    setRetryAfter(0);
-    setView(nextView);
-  };
-
-  // Show loading state while checking password
-  if (hasPassword === null) {
+  if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-bg p-4">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-          <p className="text-text-muted mt-4">Loading...</p>
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(51,65,85,0.18),transparent_45%),linear-gradient(180deg,#0b1120_0%,#111827_100%)] text-white flex items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+          <p className="text-sm text-white/70">Checking access...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-bg p-4 relative overflow-hidden">
-      {/* Faint grid background */}
-      <div className="landing-grid absolute inset-0 pointer-events-none" aria-hidden="true" />
-      <div className="relative z-10 w-full max-w-md">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-primary mb-2">9Router</h1>
-          <p className="text-text-muted">
-            {authMode === "oidc" && oidcConfigured
-              ? "Sign in with your OIDC provider to access the dashboard"
-              : showRegisterView
-                ? "Create the first dashboard account"
-                : useUserAccounts
-                ? "Sign in with your email and password"
-                : "Sign in with the legacy password or create the first account"}
-          </p>
-        </div>
-
-        <Card>
-          {mustChange ? (
-            <form onSubmit={handleSetNewPassword} className="flex flex-col gap-4">
-              <p className="text-sm text-amber-600 dark:text-amber-400 text-center">
-                Set a new password before accessing the dashboard remotely.
-              </p>
-              <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium">New password</label>
-                <Input
-                  type="password"
-                  placeholder="Enter new password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  required
-                  autoFocus
-                />
-                {error && <p className="text-xs text-red-500">{error}</p>}
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.16),transparent_38%),radial-gradient(circle_at_bottom,rgba(249,115,22,0.16),transparent_32%),linear-gradient(180deg,#0b1120_0%,#111827_52%,#030712_100%)] text-white">
+      <div className="mx-auto flex min-h-screen max-w-6xl items-center px-6 py-10">
+        <div className="grid w-full gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+          <section className="flex flex-col justify-center">
+            <div className="mb-6 inline-flex w-fit items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs tracking-[0.24em] text-white/70 uppercase">
+              9Router Access
+            </div>
+            <h1 className="max-w-xl text-4xl font-semibold leading-tight sm:text-5xl">
+              One account per user, one login flow, no legacy fallback.
+            </h1>
+            <p className="mt-5 max-w-xl text-base leading-7 text-white/70 sm:text-lg">
+              Dashboard access now uses a single account-based flow. Sign in with email and password, or create the first account before onboarding the rest of the system.
+            </p>
+            <div className="mt-8 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-sm font-medium">Account-based</p>
+                <p className="mt-2 text-sm text-white/65">Every user gets isolated settings, usage and credentials.</p>
               </div>
-              <Button type="submit" variant="primary" className="w-full" loading={loading} disabled={!newPassword}>
-                Set password
-              </Button>
-            </form>
-          ) : (
-          <div className="flex flex-col gap-4">
-            {showRegister && (
-              <div className="grid grid-cols-2 gap-2 rounded-xl bg-sidebar/60 p-1">
-                <button
-                  type="button"
-                  onClick={() => switchView("login")}
-                  className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                    showLoginView ? "bg-primary text-white" : "text-text-muted hover:bg-black/5 dark:hover:bg-white/5"
-                  }`}
-                >
-                  Đăng nhập
-                </button>
-                <button
-                  type="button"
-                  onClick={() => switchView("register")}
-                  className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                    showRegisterView ? "bg-primary text-white" : "text-text-muted hover:bg-black/5 dark:hover:bg-white/5"
-                  }`}
-                >
-                  Đăng ký
-                </button>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-sm font-medium">Single auth model</p>
+                <p className="mt-2 text-sm text-white/65">No mixed password-only mode on the main login screen anymore.</p>
               </div>
-            )}
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-sm font-medium">Ready for OIDC</p>
+                <p className="mt-2 text-sm text-white/65">OIDC still stays available when that mode is configured.</p>
+              </div>
+            </div>
+          </section>
 
-            {oidcAvailable && (
-              <Button type="button" variant="primary" className="w-full" onClick={handleOidcLogin}>
-                {oidcLoginLabel}
-              </Button>
-            )}
-
-            {oidcAvailable && passwordAvailable && showLoginView && <div className="h-px bg-border/60" />}
-
-            {passwordAvailable && showLoginView ? (
-              <form onSubmit={handleLogin} className="flex flex-col gap-4">
-                {((authMode === "oidc" && !oidcConfigured) || (authMode === "both" && !oidcConfigured)) && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400 text-center">
-                    OIDC login is enabled, but the issuer/client fields are not configured yet. Password login is still available for recovery.
+          <section>
+            <Card className="border border-white/10 bg-white/95 text-slate-950 shadow-2xl shadow-black/30 backdrop-blur">
+              <div className="flex flex-col gap-6">
+                <div>
+                  <p className="text-sm font-medium uppercase tracking-[0.22em] text-slate-500">Dashboard</p>
+                  <h2 className="mt-2 text-2xl font-semibold">
+                    {view === REGISTER_VIEW ? "Create account" : "Sign in"}
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-500">
+                    {view === REGISTER_VIEW
+                      ? "Register the first local account with a valid email and password."
+                      : "Use your email and password to enter the dashboard."}
                   </p>
-                )}
-
-                {authMode === "both" && oidcConfigured && (
-                  <p className="text-xs text-text-muted text-center">
-                    Password and OIDC login are both enabled.
-                  </p>
-                )}
-
-                {useUserAccounts ? (
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-medium">Email</label>
-                    <Input
-                      type="email"
-                      placeholder="you@example.com"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      required
-                      autoFocus={!oidcAvailable}
-                    />
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-medium">Email</label>
-                    <Input
-                      type="email"
-                      placeholder="Để trống nếu đăng nhập bằng mật khẩu hệ thống cũ"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      autoFocus={!oidcAvailable}
-                    />
-                    <p className="text-xs text-text-muted">
-                      Nếu hệ thống cũ chỉ có password, bạn có thể bỏ trống email và đăng nhập bằng password hiện tại.
-                    </p>
-                  </div>
-                )}
-
-                <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium">Password</label>
-                  <Input
-                    type="password"
-                    placeholder="Enter password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    autoFocus={!oidcAvailable && !useUserAccounts}
-                  />
-                  {error && <p className="text-xs text-red-500">{error}</p>}
-                  {retryAfter > 0 && (
-                    <p className="text-xs text-amber-600 dark:text-amber-400">
-                      Locked. Retry in <span className="font-mono">{retryAfter}s</span>.
-                    </p>
-                  )}
-                  {resetHint && (
-                    <p className="text-xs text-text-muted">
-                      Forgot password? Open <code className="bg-sidebar px-1 rounded">9router</code> CLI on the host → <b>Settings</b> → <b>Reset Password to Default</b>.
-                    </p>
-                  )}
                 </div>
 
-                <Button
-                  type="submit"
-                  variant="primary"
-                  className="w-full"
-                  loading={loading}
-                  disabled={retryAfter > 0 || (useUserAccounts && !email)}
-                >
-                  {retryAfter > 0 ? `Wait ${retryAfter}s` : "Login"}
-                </Button>
-
-                {!useUserAccounts && (
-                  <p className="text-xs text-center text-text-muted mt-2">
-                    Default password is <code className="bg-sidebar px-1 rounded">123456</code>
-                  </p>
+                {canShowRegister && (
+                  <div className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1">
+                    <button
+                      type="button"
+                      onClick={() => switchView(LOGIN_VIEW)}
+                      className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors ${
+                        view === LOGIN_VIEW ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"
+                      }`}
+                    >
+                      Đăng nhập
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => switchView(REGISTER_VIEW)}
+                      className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors ${
+                        view === REGISTER_VIEW ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"
+                      }`}
+                    >
+                      Đăng ký
+                    </button>
+                  </div>
                 )}
-                {!useUserAccounts && hasPassword === false && (
-                  <p className="text-xs text-center text-amber-600 dark:text-amber-400">
-                    Security risk: no legacy dashboard password is set. You will be asked to set one when logging in remotely.
-                  </p>
-                )}
-              </form>
-                ) : (
-              error && <p className="text-xs text-red-500">{error}</p>
-            )}
 
-            {showRegisterView && (
-              <>
-                <form onSubmit={handleRegister} className="flex flex-col gap-4">
-                  <p className="text-xs text-text-muted text-center">
-                    No dashboard account exists yet. Create the first account to use email/password login.
-                  </p>
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-medium">Email</label>
-                    <Input
-                      type="email"
-                      placeholder="you@example.com"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      required
-                    />
+                {oidcAvailable && view === LOGIN_VIEW && (
+                  <>
+                    <Button type="button" variant="primary" className="w-full" onClick={handleOidcLogin}>
+                      {oidcLoginLabel}
+                    </Button>
+                    {passwordAvailable && (
+                      <div className="relative">
+                        <div className="h-px bg-slate-200" />
+                        <span className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 bg-white px-3 text-xs uppercase tracking-[0.24em] text-slate-400">
+                          or
+                        </span>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {error && (
+                  <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                    {error}
                   </div>
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-medium">Password</label>
-                    <Input
-                      type="password"
-                      placeholder="At least 8 characters"
-                      value={registerPassword}
-                      onChange={(e) => setRegisterPassword(e.target.value)}
-                      required
-                    />
+                )}
+
+                {view === LOGIN_VIEW && passwordAvailable && (
+                  <form onSubmit={handleLogin} className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700">Email</label>
+                      <Input
+                        type="email"
+                        placeholder="you@example.com"
+                        value={loginForm.email}
+                        onChange={(event) => updateLoginField("email", event.target.value)}
+                        required
+                        autoFocus
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700">Password</label>
+                      <Input
+                        type="password"
+                        placeholder="Enter your password"
+                        value={loginForm.password}
+                        onChange={(event) => updateLoginField("password", event.target.value)}
+                        required
+                      />
+                    </div>
+                    {retryAfter > 0 && (
+                      <p className="text-xs text-amber-600">
+                        Too many attempts. Try again in {retryAfter}s.
+                      </p>
+                    )}
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      className="w-full"
+                      loading={submitting}
+                      disabled={submitting || retryAfter > 0 || !loginForm.email || !loginForm.password}
+                    >
+                      {retryAfter > 0 ? `Wait ${retryAfter}s` : "Sign in"}
+                    </Button>
+                    {canShowRegister && (
+                      <p className="text-center text-sm text-slate-500">
+                        No account yet?{" "}
+                        <button
+                          type="button"
+                          onClick={() => switchView(REGISTER_VIEW)}
+                          className="font-medium text-slate-950 underline underline-offset-4"
+                        >
+                          Create the first one
+                        </button>
+                      </p>
+                    )}
+                  </form>
+                )}
+
+                {view === REGISTER_VIEW && canShowRegister && (
+                  <form onSubmit={handleRegister} className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700">Email</label>
+                      <Input
+                        type="email"
+                        placeholder="you@example.com"
+                        value={registerForm.email}
+                        onChange={(event) => updateRegisterField("email", event.target.value)}
+                        required
+                        autoFocus
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700">Password</label>
+                      <Input
+                        type="password"
+                        placeholder="At least 8 characters"
+                        value={registerForm.password}
+                        onChange={(event) => updateRegisterField("password", event.target.value)}
+                        required
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700">Confirm password</label>
+                      <Input
+                        type="password"
+                        placeholder="Repeat your password"
+                        value={registerForm.confirmPassword}
+                        onChange={(event) => updateRegisterField("confirmPassword", event.target.value)}
+                        required
+                      />
+                    </div>
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      className="w-full"
+                      loading={submitting}
+                      disabled={
+                        submitting ||
+                        !registerForm.email ||
+                        !registerForm.password ||
+                        !registerForm.confirmPassword
+                      }
+                    >
+                      Create account
+                    </Button>
+                    <p className="text-center text-sm text-slate-500">
+                      Already have an account?{" "}
+                      <button
+                        type="button"
+                        onClick={() => switchView(LOGIN_VIEW)}
+                        className="font-medium text-slate-950 underline underline-offset-4"
+                      >
+                        Sign in
+                      </button>
+                    </p>
+                  </form>
+                )}
+
+                {!canShowRegister && view === REGISTER_VIEW && (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                    Registration is currently disabled because an account already exists.
                   </div>
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-medium">Confirm password</label>
-                    <Input
-                      type="password"
-                      placeholder="Re-enter password"
-                      value={registerConfirm}
-                      onChange={(e) => setRegisterConfirm(e.target.value)}
-                      required
-                    />
-                    {error && <p className="text-xs text-red-500">{error}</p>}
-                  </div>
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    className="w-full"
-                    loading={loading}
-                    disabled={!email || !registerPassword || !registerConfirm}
-                  >
-                    Create account
-                  </Button>
-                </form>
-              </>
-            )}
-          </div>
-          )}
-        </Card>
+                )}
+              </div>
+            </Card>
+          </section>
+        </div>
       </div>
     </div>
   );
