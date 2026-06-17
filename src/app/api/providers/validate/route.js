@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import { getProviderNodeById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
-import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
-import { openaiToCommandCode } from "open-sse/translator/request/openai-to-commandcode.js";
-import { PROVIDER_ENDPOINTS } from "@/shared/constants/config";
+import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from "open-sse/config/providers.js";
+import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
+import { normalizeProviderId } from "@/lib/providerNormalization";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
 // Returns true if API key is accepted (status !== 401 && !== 403).
@@ -74,7 +74,7 @@ async function probeMediaProvider(provider, apiKey) {
   const res = await fetch(cfg.baseUrl, {
     method,
     headers,
-    body: method === "GET" ? undefined : JSON.stringify({ input: "ping", text: "ping", prompt: "ping", model: cfg.models?.[0]?.id || "test" }),
+    body: method === "GET" ? undefined : JSON.stringify({ input: "ping", text: "ping", prompt: "ping", model: getDefaultModel(provider) || "test" }),
     signal: AbortSignal.timeout(8000),
   });
   return res.status !== 401 && res.status !== 403;
@@ -84,7 +84,8 @@ async function probeMediaProvider(provider, apiKey) {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { provider, apiKey, providerSpecificData } = body;
+    const provider = normalizeProviderId(body.provider);
+    const { apiKey, providerSpecificData } = body;
 
     const isNoAuth = AI_PROVIDERS[provider]?.noAuth === true;
     if (!provider || (!apiKey && provider !== "ollama-local" && !isNoAuth)) {
@@ -249,6 +250,13 @@ export async function POST(request) {
           isValid = openaiRes.ok;
           break;
 
+        case "vercel-ai-gateway":
+          const vercelAiGatewayRes = await fetch("https://ai-gateway.vercel.sh/v1/models", {
+            headers: { "Authorization": `Bearer ${apiKey}` },
+          });
+          isValid = vercelAiGatewayRes.ok;
+          break;
+
         case "anthropic":
           const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
@@ -284,54 +292,40 @@ export async function POST(request) {
         case "minimax":
         case "minimax-cn":
         case "alicode-intl":
-        case "alicode": {
-          const claudeBaseUrls = {
-            glm: "https://api.z.ai/api/anthropic/v1/messages",
-            "glm-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
-            kimi: "https://api.kimi.com/coding/v1/messages",
-            minimax: "https://api.minimax.io/anthropic/v1/messages",
-            "minimax-cn": "https://api.minimaxi.com/anthropic/v1/messages",
-            alicode: "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
-            "alicode-intl": "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
-          };
+        case "alicode":
+        case "agentrouter": {
+          // Use baseUrl from PROVIDERS (DRY); separate openai-format vs claude-format flow
+          const cfg = PROVIDERS[provider];
+          const isOpenAiFormat = provider === "glm-cn" || provider === "alicode" || provider === "alicode-intl";
 
-          // glm-cn, alicode and alicode-intl use OpenAI format
-          if (provider === "glm-cn" || provider === "alicode" || provider === "alicode-intl") {
+          if (isOpenAiFormat) {
             const testModel = getDefaultModel(provider);
-            const glmCnRes = await fetch(claudeBaseUrls[provider], {
+            const res = await fetch(cfg.baseUrl, {
               method: "POST",
-              headers: {
-                "Authorization": `Bearer ${apiKey}`,
-                "content-type": "application/json",
-              },
-              body: JSON.stringify({
-                model: testModel,
-                max_tokens: 1,
-                messages: [{ role: "user", content: "test" }],
-              }),
+              headers: { "Authorization": `Bearer ${apiKey}`, "content-type": "application/json" },
+              body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
             });
-            isValid = glmCnRes.status !== 401 && glmCnRes.status !== 403;
+            isValid = res.status !== 401 && res.status !== 403;
           } else {
-            const claudeRes = await fetch(claudeBaseUrls[provider], {
+            const testModel = getDefaultModel(provider) || "claude-sonnet-4-20250514";
+            const res = await fetch(cfg.baseUrl, {
               method: "POST",
               headers: {
                 "x-api-key": apiKey,
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
+                ...(cfg.headers || {}),
               },
-              body: JSON.stringify({
-                model: "claude-sonnet-4-20250514",
-                max_tokens: 1,
-                messages: [{ role: "user", content: "test" }],
-              }),
+              body: JSON.stringify({ model: testModel, max_tokens: 1, messages: [{ role: "user", content: "test" }] }),
             });
-            isValid = claudeRes.status !== 401;
+            // 400 = model resolution error but auth passed (e.g. agentrouter "no available channel")
+            isValid = res.status !== 401 && res.status !== 403;
           }
           break;
         }
         case "volcengine-ark":
         case "byteplus": {
-          const res = await fetch(PROVIDER_ENDPOINTS[provider], {
+          const res = await fetch(PROVIDERS[provider]?.baseUrl, {
             method: "POST",
             headers: {
               "Authorization": `Bearer ${apiKey}`,
@@ -365,27 +359,15 @@ export async function POST(request) {
         case "nanobanana":
         case "chutes":
         case "xiaomi-mimo":
+        case "xiaomi-tokenplan":
         case "nvidia": {
           const endpoints = {
-            deepseek: "https://api.deepseek.com/models",
-            groq: "https://api.groq.com/openai/v1/models",
-            xai: "https://api.x.ai/v1/models",
-            mistral: "https://api.mistral.ai/v1/models",
-            perplexity: "https://api.perplexity.ai/models",
-            together: "https://api.together.xyz/v1/models",
-            fireworks: "https://api.fireworks.ai/inference/v1/models",
-            cerebras: "https://api.cerebras.ai/v1/models",
-            cohere: "https://api.cohere.ai/v1/models",
-            nebius: "https://api.studio.nebius.ai/v1/models",
-            siliconflow: "https://api.siliconflow.cn/v1/models",
-            hyperbolic: "https://api.hyperbolic.xyz/v1/models",
-            ollama: "https://ollama.com/api/tags",
+            ...Object.fromEntries(
+              Object.entries(PROVIDERS).filter(([, t]) => t.validateUrl).map(([id, t]) => [id, t.validateUrl])
+            ),
+            // dynamic URLs (depend on providerSpecificData) — kept inline
             "ollama-local": `${resolveOllamaLocalHost({ providerSpecificData })}/api/tags`,
-            assemblyai: "https://api.assemblyai.com/v1/account",
-            nanobanana: "https://api.nanobananaapi.ai/v1/models",
-            chutes: "https://llm.chutes.ai/v1/models",
-            nvidia: "https://integrate.api.nvidia.com/v1/models",
-            "xiaomi-mimo": "https://api.xiaomimimo.com/v1/models"
+            "xiaomi-tokenplan": `${resolveXiaomiTokenplanBaseUrl({ providerSpecificData })}/models`,
           };
           const headers = {};
           if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
@@ -417,7 +399,7 @@ export async function POST(request) {
         case "commandcode": {
           const cfg = PROVIDERS.commandcode;
           const model = getDefaultModel("commandcode");
-          const payload = openaiToCommandCode(model, {
+          const payload = openaiToCommandCodeRequest(model, {
             messages: [{ role: "user", content: "ping" }],
             max_tokens: 1,
             stream: false,
@@ -586,8 +568,43 @@ export async function POST(request) {
           break;
         }
 
-        default:
-          return NextResponse.json({ error: "Provider validation not supported" }, { status: 400 });
+        default: {
+          // Generic probe for OpenAI-compatible providers (config-driven from PROVIDERS)
+          const cfg = PROVIDERS[provider];
+          if (!cfg || cfg.format !== "openai" || !cfg.baseUrl) {
+            return NextResponse.json({ error: "Provider validation not supported" }, { status: 400 });
+          }
+          if (cfg.noAuth) {
+            isValid = true;
+            break;
+          }
+          // Build auth headers based on cfg.authHeader (default: bearer)
+          const headers = { "Content-Type": "application/json", ...(cfg.headers || {}) };
+          if (cfg.authHeader === "x-api-key") headers["X-API-Key"] = apiKey;
+          else headers["Authorization"] = `Bearer ${apiKey}`;
+          // Try /models first (fast GET), fallback to chat probe on ambiguous response
+          const modelsUrl = cfg.baseUrl.replace(/\/chat\/completions$/, "/models").replace(/\/chatbot$/, "/models");
+          let probeOk = null;
+          try {
+            const probeRes = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(8000) });
+            if (probeRes.status === 401 || probeRes.status === 403) probeOk = false;
+            else if (probeRes.ok) probeOk = true;
+          } catch { /* fallback to chat */ }
+          if (probeOk !== null) {
+            isValid = probeOk;
+            break;
+          }
+          // Fallback: minimal chat probe
+          const defaultModel = getDefaultModel(provider) || "test";
+          const chatRes = await fetch(cfg.baseUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ model: defaultModel, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
+            signal: AbortSignal.timeout(10000),
+          });
+          isValid = chatRes.status !== 401 && chatRes.status !== 403;
+          break;
+        }
       }
     } catch (err) {
       error = err.message;

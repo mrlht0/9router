@@ -1,66 +1,180 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import QuotaTable from "./QuotaTable";
 import Toggle from "@/shared/components/Toggle";
-import { parseQuotaData, calculatePercentage } from "./utils";
+import Tooltip from "@/shared/components/Tooltip";
+import {
+  parseQuotaData,
+  calculatePercentage,
+  getConnectionLabel,
+  getConnectionQuotaRemaining,
+  sortVisibleConnections,
+  buildLoadingState,
+  filterQuotaStateByConnections,
+  getConnectionsEmptyMessage,
+  getPageSizeLabel,
+  getConnectionsPaginationSummary,
+  getSafePagination,
+  getSafeTotals,
+  shouldResetPage,
+  getPaginationPageValue,
+  getProviderOptions,
+  reconcileConnectionsPage,
+  getQuotaCache,
+  setQuotaCache,
+  QUOTA_CACHE_KEY,
+  REFRESH_INTERVAL_MS,
+  CLAUDE_REFRESH_INTERVAL_MS,
+  DEPLETED_QUOTA_THRESHOLD,
+  AUTO_REFRESH_STORAGE_KEY,
+  CONNECTIONS_PAGE_SIZE,
+  ACCOUNT_PAGE_SIZE_OPTIONS,
+  ACCOUNT_PAGE_SIZE_MAX,
+  ACCOUNT_FILTER_OPTIONS,
+  QUOTA_SORT_OPTIONS,
+} from "./utils";
 import Card from "@/shared/components/Card";
-import { EditConnectionModal } from "@/shared/components";
-import { USAGE_SUPPORTED_PROVIDERS, USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
+import { ConfirmModal, EditConnectionModal } from "@/shared/components";
+import { USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
+import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
-// Connection is eligible for the quota page when it uses OAuth or is an apikey provider whitelisted for quota
-const isUsageEligible = (conn) =>
-  USAGE_SUPPORTED_PROVIDERS.includes(conn.provider) &&
-  (conn.authType === "oauth" || USAGE_APIKEY_PROVIDERS.includes(conn.provider));
+// Maps the stored providerSpecificData.authMethod to a human label for Kiro.
+// Values come from the Kiro connect flows: builder-id/idc (device code),
+// google/github (social), imported (refresh-token paste), api_key (headless).
+const KIRO_METHOD_LABELS = {
+  "builder-id": "AWS Builder ID",
+  idc: "IAM Identity Center",
+  google: "Google",
+  github: "GitHub",
+  imported: "Imported Token",
+  api_key: "API Key",
+};
 
-const REFRESH_INTERVAL_MS = 60000; // 60 seconds
-const DEPLETED_QUOTA_THRESHOLD = 5; // percent
-const AUTO_REFRESH_STORAGE_KEY = "quotaAutoRefresh";
+function kiroMethodLabel(conn) {
+  const m = conn.providerSpecificData?.authMethod;
+  if (m && KIRO_METHOD_LABELS[m]) return KIRO_METHOD_LABELS[m];
+  return conn.authType === "api_key" ? "API Key" : "OAuth";
+}
+
+function getConnectionSecondaryLabel(connection) {
+  if (connection.name?.trim() && connection.email?.trim() && connection.name.trim() !== connection.email.trim()) {
+    return connection.email.trim();
+  }
+
+  if (connection.name?.trim() && connection.displayName?.trim() && connection.name.trim() !== connection.displayName.trim()) {
+    return connection.displayName.trim();
+  }
+
+  return null;
+}
+
+// Region is stored for builder-id/idc/api_key flows; social and imported flows
+// omit it, so fall back to the region segment of the profileArn
+// (arn:aws:codewhisperer:<region>:...).
+function kiroRegion(conn) {
+  const r = conn.providerSpecificData?.region;
+  if (r) return r;
+  const arn = conn.providerSpecificData?.profileArn;
+  const seg = typeof arn === "string" ? arn.split(":")[3] : "";
+  return seg || "";
+}
+
+function getCodexResetCreditCount(quota) {
+  const value = quota?.raw?.resetCredits?.availableCount;
+  const count = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(count) ? Math.max(0, count) : 0;
+}
 
 export default function ProviderLimits() {
+  const { copied, copy } = useCopyToClipboard();
   const [connections, setConnections] = useState([]);
   const [quotaData, setQuotaData] = useState({});
   const [loading, setLoading] = useState({});
   const [errors, setErrors] = useState({});
-  const [autoRefresh, setAutoRefresh] = useState(() => {
-    if (typeof window === "undefined") return true;
-    const stored = window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
-    return stored === null ? true : stored === "true";
-  });
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoPingMap, setAutoPingMap] = useState({});
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [hasHydratedAutoRefresh, setHasHydratedAutoRefresh] = useState(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [countdown, setCountdown] = useState(60);
   const [connectionsLoading, setConnectionsLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
+  const [resettingLimitId, setResettingLimitId] = useState(null);
+  const [resetConfirmState, setResetConfirmState] = useState(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [proxyPools, setProxyPools] = useState([]);
   const [providerFilter, setProviderFilter] = useState("all");
+  const [providerOptions, setProviderOptions] = useState([]);
+  const [accountFilter, setAccountFilter] = useState("all");
+  const [quotaSortMode, setQuotaSortMode] = useState("default");
   const [expiringFirst, setExpiringFirst] = useState(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
   const [bulkToggling, setBulkToggling] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(CONNECTIONS_PAGE_SIZE);
+  const [customPageSizeInput, setCustomPageSizeInput] = useState(
+    String(CONNECTIONS_PAGE_SIZE),
+  );
+  const [pagination, setPagination] = useState({
+    page: 1,
+    pageSize: CONNECTIONS_PAGE_SIZE,
+    total: 0,
+    totalPages: 1,
+  });
+  const [totals, setTotals] = useState({
+    eligibleConnections: 0,
+    providerFilteredConnections: 0,
+  });
 
   const intervalRef = useRef(null);
   const countdownRef = useRef(null);
+  const tickCountRef = useRef(0);
 
-  // Fetch all provider connections
-  const fetchConnections = useCallback(async () => {
-    try {
-      const response = await fetch("/api/providers/client");
-      if (!response.ok) throw new Error("Failed to fetch connections");
+  const fetchConnections = useCallback(
+    async (targetPage = page) => {
+      try {
+        const params = new URLSearchParams({
+          page: String(targetPage),
+          pageSize: String(pageSize),
+          accountStatus: accountFilter,
+          sort: "priority",
+        });
 
-      const data = await response.json();
-      const connectionList = data.connections || [];
-      setConnections(connectionList);
-      return connectionList;
-    } catch (error) {
-      console.error("Error fetching connections:", error);
-      setConnections([]);
-      return [];
-    }
-  }, []);
+        if (providerFilter !== "all") {
+          params.set("provider", providerFilter);
+        }
+
+        const response = await fetch(
+          `/api/providers/client?${params.toString()}`,
+        );
+        if (!response.ok) throw new Error("Failed to fetch connections");
+
+        const data = await response.json();
+        const connectionList = data.connections || [];
+        const nextPagination = getSafePagination(data.pagination, pageSize);
+        const nextTotals = getSafeTotals(data.totals, connectionList.length);
+
+        setConnections(connectionList);
+        setProviderOptions(getProviderOptions(data.providerOptions));
+        setPagination(nextPagination);
+        setTotals(nextTotals);
+        setPage(getPaginationPageValue(data.pagination, targetPage));
+        return connectionList;
+      } catch (error) {
+        console.error("Error fetching connections:", error);
+        setConnections([]);
+        setProviderOptions([]);
+        setPagination({ page: 1, pageSize, total: 0, totalPages: 1 });
+        setTotals({ eligibleConnections: 0, providerFilteredConnections: 0 });
+        return [];
+      }
+    },
+    [accountFilter, expiringFirst, page, pageSize, providerFilter],
+  );
 
   // Fetch quota for a specific connection
   const fetchQuota = useCallback(async (connectionId, provider) => {
@@ -92,13 +206,15 @@ export default function ProviderLimits() {
             `[ProviderLimits] Auth error for ${provider}:`,
             errorMsg,
           );
+          const quotaEntry = {
+            quotas: [],
+            message: errorMsg,
+          };
           setQuotaData((prev) => ({
             ...prev,
-            [connectionId]: {
-              quotas: [],
-              message: errorMsg,
-            },
+            [connectionId]: quotaEntry,
           }));
+          setQuotaCache(connectionId, quotaEntry);
           return;
         }
 
@@ -111,15 +227,18 @@ export default function ProviderLimits() {
       // Parse quota data using provider-specific parser
       const parsedQuotas = parseQuotaData(provider, data);
 
+      const quotaEntry = {
+        quotas: parsedQuotas,
+        plan: data.plan || null,
+        message: data.message || null,
+        raw: data,
+      };
+
       setQuotaData((prev) => ({
         ...prev,
-        [connectionId]: {
-          quotas: parsedQuotas,
-          plan: data.plan || null,
-          message: data.message || null,
-          raw: data,
-        },
+        [connectionId]: quotaEntry,
       }));
+      setQuotaCache(connectionId, quotaEntry);
     } catch (error) {
       console.error(
         `[ProviderLimits] Error fetching quota for ${provider} (${connectionId}):`,
@@ -143,55 +262,105 @@ export default function ProviderLimits() {
     [fetchQuota],
   );
 
-  const handleDeleteConnection = useCallback(async (id) => {
-    if (!confirm("Delete this connection?")) return;
-    setDeletingId(id);
-    try {
-      const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        setConnections((prev) => prev.filter((c) => c.id !== id));
-        setQuotaData((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setLoading((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setErrors((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-      }
-    } catch (error) {
-      console.error("Error deleting connection:", error);
-    } finally {
-      setDeletingId(null);
-    }
-  }, []);
+  const handleResetCodexLimit = useCallback(
+    async (connectionId, provider) => {
+      if (provider !== "codex" || resettingLimitId) return;
 
-  const handleToggleConnectionActive = useCallback(async (id, isActive) => {
-    setTogglingId(id);
-    try {
-      const res = await fetch(`/api/providers/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ isActive }),
-      });
-      if (res.ok) {
-        setConnections((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, isActive } : c)),
-        );
+      setResettingLimitId(connectionId);
+      setErrors((prev) => ({ ...prev, [connectionId]: null }));
+
+      try {
+        const response = await fetch(`/api/usage/${connectionId}/codex-reset-credits`, { method: "POST" });
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(result.message || result.error || result.code || "Failed to reset Codex limit");
+        }
+
+        await fetchQuota(connectionId, provider);
+        setLastUpdated(new Date());
+      } catch (error) {
+        setErrors((prev) => ({ ...prev, [connectionId]: error.message || "Failed to reset Codex limit" }));
+      } finally {
+        setResettingLimitId(null);
       }
-    } catch (error) {
-      console.error("Error updating connection status:", error);
-    } finally {
-      setTogglingId(null);
-    }
-  }, []);
+    },
+    [fetchQuota, resettingLimitId],
+  );
+
+  const handleDeleteConnection = useCallback(
+    async (id) => {
+      if (!confirm("Delete this connection?")) return;
+      setDeletingId(id);
+      try {
+        const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
+        if (res.ok) {
+          setQuotaData((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          setLoading((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          setErrors((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+
+          if (typeof window !== "undefined") {
+            try {
+              const cache = getQuotaCache();
+              if (cache[id]) {
+                delete cache[id];
+                window.localStorage.setItem(
+                  QUOTA_CACHE_KEY,
+                  JSON.stringify(cache),
+                );
+              }
+            } catch (e) {
+              console.error("Error deleting cache entry:", e);
+            }
+          }
+
+          await reconcileConnectionsPage(fetchConnections, page);
+        }
+      } catch (error) {
+        console.error("Error deleting connection:", error);
+      } finally {
+        setDeletingId(null);
+      }
+    },
+    [fetchConnections, page],
+  );
+
+  const handleToggleConnectionActive = useCallback(
+    async (id, isActive) => {
+      setTogglingId(id);
+      try {
+        const res = await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive }),
+        });
+        if (res.ok) {
+          setQuotaData((prev) => {
+            const next = { ...prev };
+            return next;
+          });
+          await reconcileConnectionsPage(fetchConnections, page);
+        }
+      } catch (error) {
+        console.error("Error updating connection status:", error);
+      } finally {
+        setTogglingId(null);
+      }
+    },
+    [fetchConnections, page],
+  );
 
   const handleUpdateConnection = useCallback(
     async (formData) => {
@@ -234,21 +403,33 @@ export default function ProviderLimits() {
     };
   }, []);
 
-  // Refresh all providers
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async (force = false) => {
     if (refreshingAll) return;
 
     setRefreshingAll(true);
     setCountdown(60);
 
-    try {
-      const conns = await fetchConnections();
+    // Throttle Claude: poll its quota every Nth auto-tick (manual force bypasses)
+    const tick = (tickCountRef.current += 1);
+    const claudeEvery = Math.round(CLAUDE_REFRESH_INTERVAL_MS / REFRESH_INTERVAL_MS);
+    const shouldFetch = (conn) =>
+      force || conn.provider !== "claude" || tick % claudeEvery === 0;
 
-      // Filter eligible connections (OAuth + whitelisted apikey)
-      const eligibleConnections = conns.filter(isUsageEligible);
+    try {
+      const visibleConnections = await fetchConnections(page);
+
+      setLoading(buildLoadingState(visibleConnections));
+      setErrors((prev) =>
+        filterQuotaStateByConnections(prev, visibleConnections),
+      );
+      setQuotaData((prev) =>
+        filterQuotaStateByConnections(prev, visibleConnections),
+      );
 
       await Promise.all(
-        eligibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
+        visibleConnections
+          .filter(shouldFetch)
+          .map((conn) => fetchQuota(conn.id, conn.provider)),
       );
 
       setLastUpdated(new Date());
@@ -257,42 +438,73 @@ export default function ProviderLimits() {
     } finally {
       setRefreshingAll(false);
     }
-  }, [refreshingAll, fetchConnections, fetchQuota]);
+  }, [refreshingAll, fetchConnections, fetchQuota, page]);
 
-  // Initial load: fetch connections first so cards render immediately, then fetch quotas
   useEffect(() => {
     const initializeData = async () => {
       setConnectionsLoading(true);
-      const conns = await fetchConnections();
+      const visibleConnections = await fetchConnections(page);
       setConnectionsLoading(false);
 
-      const eligibleConnections = conns.filter(isUsageEligible);
-
-      // Mark all as loading before fetching
-      const loadingState = {};
-      eligibleConnections.forEach((conn) => {
-        loadingState[conn.id] = true;
-      });
-      setLoading(loadingState);
+      // Always fetch fresh quota on mount, no cache display
+      setLoading(buildLoadingState(visibleConnections));
+      setErrors((prev) =>
+        filterQuotaStateByConnections(prev, visibleConnections),
+      );
+      setQuotaData((prev) =>
+        filterQuotaStateByConnections(prev, visibleConnections),
+      );
 
       await Promise.all(
-        eligibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
+        visibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
       );
       setLastUpdated(new Date());
     };
 
     initializeData();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchConnections, fetchQuota, page]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+    setAutoRefresh(stored === null ? true : stored === "true");
+    setHasHydratedAutoRefresh(true);
+  }, []);
 
   // Persist auto-refresh preference
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !hasHydratedAutoRefresh) return;
     window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(autoRefresh));
-  }, [autoRefresh]);
+  }, [autoRefresh, hasHydratedAutoRefresh]);
+
+  // Load Claude auto-ping per-connection map
+  useEffect(() => {
+    fetch("/api/settings", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((s) => setAutoPingMap(s?.claudeAutoPing?.connections || {}))
+      .catch(() => {});
+  }, []);
+
+  const toggleAutoPing = useCallback(async (connectionId, on) => {
+    const next = { ...autoPingMap, [connectionId]: on };
+    setAutoPingMap(next);
+    try {
+      const r = await fetch("/api/settings", { cache: "no-store" });
+      const s = r.ok ? await r.json() : {};
+      const cfg = { ...(s.claudeAutoPing || {}), connections: next };
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claudeAutoPing: cfg }),
+      });
+    } catch {
+      setAutoPingMap(autoPingMap);
+    }
+  }, [autoPingMap]);
 
   // Auto-refresh interval
   useEffect(() => {
-    if (!autoRefresh) {
+    if (!hasHydratedAutoRefresh || !autoRefresh) {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
@@ -321,7 +533,7 @@ export default function ProviderLimits() {
       if (intervalRef.current) clearInterval(intervalRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [autoRefresh, refreshAll]);
+  }, [autoRefresh, refreshAll, hasHydratedAutoRefresh]);
 
   // Pause auto-refresh when tab is hidden (Page Visibility API)
   useEffect(() => {
@@ -335,9 +547,9 @@ export default function ProviderLimits() {
           clearInterval(countdownRef.current);
           countdownRef.current = null;
         }
-      } else if (autoRefresh) {
+      } else if (autoRefresh && hasHydratedAutoRefresh) {
         // Resume auto-refresh when tab becomes visible
-        intervalRef.current = setInterval(refreshAll, REFRESH_INTERVAL_MS);
+        intervalRef.current = setInterval(() => refreshAll(), REFRESH_INTERVAL_MS);
         countdownRef.current = setInterval(() => {
           setCountdown((prev) => (prev <= 1 ? 60 : prev - 1));
         }, 1000);
@@ -348,34 +560,19 @@ export default function ProviderLimits() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [autoRefresh, refreshAll]);
+  }, [autoRefresh, refreshAll, hasHydratedAutoRefresh]);
 
-  // Filter eligible connections (OAuth + whitelisted apikey)
-  const filteredConnections = connections.filter(isUsageEligible);
-
-  const providerFilteredConnections = filteredConnections.filter(
-    (conn) => providerFilter === "all" || conn.provider === providerFilter,
+  const sortedConnections = useMemo(
+    () =>
+      sortVisibleConnections(
+        connections,
+        quotaData,
+        expiringFirst,
+        providerFilter,
+        quotaSortMode,
+      ),
+    [connections, quotaData, expiringFirst, providerFilter, quotaSortMode],
   );
-
-  const getEarliestResetTime = (conn) => {
-    const resetTimes = (quotaData[conn.id]?.quotas || [])
-      .map((quota) => quota.resetAt ? new Date(quota.resetAt).getTime() : Number.POSITIVE_INFINITY)
-      .filter((time) => Number.isFinite(time));
-    return resetTimes.length > 0 ? Math.min(...resetTimes) : Number.POSITIVE_INFINITY;
-  };
-
-  // Sort providers by USAGE_SUPPORTED_PROVIDERS order, then alphabetically.
-  // Optionally surface accounts with quotas expiring soonest first.
-  const sortedConnections = [...providerFilteredConnections].sort((a, b) => {
-    if (expiringFirst) {
-      const expiryDiff = getEarliestResetTime(a) - getEarliestResetTime(b);
-      if (expiryDiff !== 0) return expiryDiff;
-    }
-    const orderA = USAGE_SUPPORTED_PROVIDERS.indexOf(a.provider);
-    const orderB = USAGE_SUPPORTED_PROVIDERS.indexOf(b.provider);
-    if (orderA !== orderB) return orderA - orderB;
-    return a.provider.localeCompare(b.provider);
-  });
 
   // Connection is depleted when any quota entry hit the threshold
   const isConnectionDepleted = (conn) => {
@@ -401,16 +598,14 @@ export default function ProviderLimits() {
             }),
           ),
         );
-        setConnections((prev) =>
-          prev.map((c) => (targetIds.includes(c.id) ? { ...c, isActive } : c)),
-        );
+        await reconcileConnectionsPage(fetchConnections, page);
       } catch (error) {
         console.error("Error bulk toggling connections:", error);
       } finally {
         setBulkToggling(false);
       }
     },
-    [bulkToggling],
+    [bulkToggling, fetchConnections, page],
   );
 
   const handleDisableDepleted = () => {
@@ -427,29 +622,20 @@ export default function ProviderLimits() {
     bulkSetActive(ids, true);
   };
 
-  const providerOptions = Array.from(new Set(filteredConnections.map((conn) => conn.provider))).sort();
-  const selectedProviderLabel = providerFilter === "all" ? "All providers" : providerFilter;
+  const selectedProviderLabel =
+    providerFilter === "all" ? "All providers" : providerFilter;
+  const hasEligibleConnections = totals.eligibleConnections > 0;
+  const hasVisibleConnections = sortedConnections.length > 0;
+  const emptyState = getConnectionsEmptyMessage(
+    totals,
+    providerFilter,
+    accountFilter,
+  );
+  const connectionsPageSummary = getConnectionsPaginationSummary(pagination);
+  const isCustomPageSize = !ACCOUNT_PAGE_SIZE_OPTIONS.includes(pageSize);
+  const pageSizeLabel = getPageSizeLabel(pageSize, isCustomPageSize);
 
-  // Calculate summary stats
-  const totalProviders = sortedConnections.length;
-  const activeWithLimits = Object.values(quotaData).filter(
-    (data) => data?.quotas?.length > 0,
-  ).length;
-
-  // Count low quotas (remaining < 30%)
-  const lowQuotasCount = Object.values(quotaData).reduce((count, data) => {
-    if (!data?.quotas) return count;
-
-    const hasLowQuota = data.quotas.some((quota) => {
-      const percentage = calculatePercentage(quota.used, quota.total);
-      return percentage < 30 && quota.total > 0;
-    });
-
-    return count + (hasLowQuota ? 1 : 0);
-  }, 0);
-
-  // Empty state
-  if (!connectionsLoading && sortedConnections.length === 0) {
+  if (!connectionsLoading && !hasEligibleConnections) {
     return (
       <Card padding="lg">
         <div className="text-center py-12">
@@ -468,16 +654,28 @@ export default function ProviderLimits() {
     );
   }
 
+  if (!connectionsLoading && !hasVisibleConnections) {
+    return (
+      <Card padding="lg">
+        <div className="text-center py-12">
+          <span className="material-symbols-outlined text-[64px] text-text-muted opacity-20">
+            {emptyState.icon}
+          </span>
+          <h3 className="mt-4 text-lg font-semibold text-text-primary">
+            {emptyState.title}
+          </h3>
+          <p className="mt-2 text-sm text-text-muted max-w-md mx-auto">
+            {emptyState.description}
+          </p>
+        </div>
+      </Card>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Header Controls */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-          <h2 className="text-xl font-semibold text-text-primary">
-            Provider Limits
-          </h2>
-        </div>
-
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-end">
         <div className="flex flex-wrap items-center gap-1.5">
           <div className="relative">
             <button
@@ -490,7 +688,9 @@ export default function ProviderLimits() {
             >
               <span className="flex min-w-0 items-center gap-1.5">
                 {providerFilter === "all" ? (
-                  <span className="material-symbols-outlined text-[14px] text-text-muted">apps</span>
+                  <span className="material-symbols-outlined text-[14px] text-text-muted">
+                    apps
+                  </span>
                 ) : (
                   <ProviderIcon
                     src={`/providers/${providerFilter}.png`}
@@ -500,9 +700,13 @@ export default function ProviderLimits() {
                     fallbackText={providerFilter.slice(0, 2).toUpperCase()}
                   />
                 )}
-                <span className="truncate capitalize hidden lg:inline">{selectedProviderLabel}</span>
+                <span className="truncate capitalize hidden lg:inline">
+                  {selectedProviderLabel}
+                </span>
               </span>
-              <span className="material-symbols-outlined text-[14px] text-text-muted">expand_more</span>
+              <span className="material-symbols-outlined text-[14px] text-text-muted">
+                expand_more
+              </span>
             </button>
 
             {providerMenuOpen && (
@@ -516,12 +720,24 @@ export default function ProviderLimits() {
                 <div className="absolute left-0 z-40 mt-2 w-64 overflow-hidden rounded-2xl border border-black/10 bg-surface/95 p-1.5 shadow-xl shadow-black/10 backdrop-blur dark:border-white/10 dark:bg-surface/95 sm:w-72">
                   <button
                     type="button"
-                    onClick={() => { setProviderFilter("all"); setProviderMenuOpen(false); }}
+                    onClick={() => {
+                      if (shouldResetPage(providerFilter, "all")) {
+                        setPage(1);
+                      }
+                      setProviderFilter("all");
+                      setProviderMenuOpen(false);
+                    }}
                     className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${providerFilter === "all" ? "bg-primary/10 text-primary" : "text-text-primary hover:bg-black/5 dark:hover:bg-white/10"}`}
                   >
-                    <span className="material-symbols-outlined text-[22px]">apps</span>
+                    <span className="material-symbols-outlined text-[22px]">
+                      apps
+                    </span>
                     <span className="font-medium">All providers</span>
-                    {providerFilter === "all" && <span className="material-symbols-outlined ml-auto text-[20px]">check</span>}
+                    {providerFilter === "all" && (
+                      <span className="material-symbols-outlined ml-auto text-[20px]">
+                        check
+                      </span>
+                    )}
                   </button>
                   <div className="my-1 h-px bg-black/10 dark:bg-white/10" />
                   <div className="max-h-72 overflow-y-auto pr-1">
@@ -529,7 +745,13 @@ export default function ProviderLimits() {
                       <button
                         key={provider}
                         type="button"
-                        onClick={() => { setProviderFilter(provider); setProviderMenuOpen(false); }}
+                        onClick={() => {
+                          if (shouldResetPage(providerFilter, provider)) {
+                            setPage(1);
+                          }
+                          setProviderFilter(provider);
+                          setProviderMenuOpen(false);
+                        }}
                         className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${providerFilter === provider ? "bg-primary/10 text-primary" : "text-text-primary hover:bg-black/5 dark:hover:bg-white/10"}`}
                       >
                         <ProviderIcon
@@ -539,8 +761,14 @@ export default function ProviderLimits() {
                           className="size-6 rounded-md object-contain"
                           fallbackText={provider.slice(0, 2).toUpperCase()}
                         />
-                        <span className="font-medium capitalize">{provider}</span>
-                        {providerFilter === provider && <span className="material-symbols-outlined ml-auto text-[20px]">check</span>}
+                        <span className="font-medium capitalize">
+                          {provider}
+                        </span>
+                        {providerFilter === provider && (
+                          <span className="material-symbols-outlined ml-auto text-[20px]">
+                            check
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -548,13 +776,50 @@ export default function ProviderLimits() {
               </>
             )}
           </div>
+          <select
+            value={accountFilter}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              if (shouldResetPage(accountFilter, nextValue)) {
+                setPage(1);
+              }
+              setAccountFilter(nextValue);
+            }}
+            className="h-8 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+            aria-label="Filter accounts by status"
+          >
+            {ACCOUNT_FILTER_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+
+          {providerFilter === "codex" && (
+            <select
+              value={quotaSortMode}
+              onChange={(event) => setQuotaSortMode(event.target.value)}
+              className="h-8 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+              aria-label="Sort Codex quotas by remaining"
+            >
+              {QUOTA_SORT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          )}
+
           <button
             type="button"
             onClick={() => setExpiringFirst((prev) => !prev)}
+            aria-pressed={expiringFirst}
             className={`flex h-8 shrink-0 items-center gap-1 rounded-lg border px-2 text-xs transition-colors ${expiringFirst ? "border-amber-500/40 bg-amber-500/10 text-amber-500" : "border-black/10 text-text-primary hover:bg-black/5 dark:border-white/10 dark:hover:bg-white/5"}`}
             title="Sort accounts by earliest quota reset time"
           >
-            <span className="material-symbols-outlined text-[14px]">hourglass_top</span>
+            <span className="material-symbols-outlined text-[14px]">
+              hourglass_top
+            </span>
             <span className="hidden sm:inline">Expiring first</span>
           </button>
 
@@ -564,7 +829,7 @@ export default function ProviderLimits() {
             onClick={handleDisableDepleted}
             disabled={bulkToggling}
             className="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-red-500/30 px-2 text-xs text-red-500 transition-colors hover:bg-red-500/10 disabled:opacity-50"
-            title="Disable connections with depleted quota (within current filter)"
+            title="Disable connections with depleted quota on the current page"
           >
             <span className="material-symbols-outlined text-[14px]">block</span>
             <span className="hidden sm:inline">Turn off Empty</span>
@@ -576,9 +841,11 @@ export default function ProviderLimits() {
             onClick={handleEnableAvailable}
             disabled={bulkToggling}
             className="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-emerald-500/30 px-2 text-xs text-emerald-500 transition-colors hover:bg-emerald-500/10 disabled:opacity-50"
-            title="Enable connections that still have quota (within current filter)"
+            title="Enable connections that still have quota on the current page"
           >
-            <span className="material-symbols-outlined text-[14px]">check_circle</span>
+            <span className="material-symbols-outlined text-[14px]">
+              check_circle
+            </span>
             <span className="hidden sm:inline">Turn on Available</span>
           </button>
 
@@ -595,26 +862,42 @@ export default function ProviderLimits() {
             >
               {autoRefresh ? "toggle_on" : "toggle_off"}
             </span>
-            <span className="hidden text-text-primary sm:inline">Auto-refresh</span>
+            <span className="hidden text-text-primary sm:inline">
+              Auto-refresh
+            </span>
             {autoRefresh && (
-              <span className="text-[10px] text-text-muted tabular-nums">({countdown}s)</span>
+              <span className="text-[10px] text-text-muted tabular-nums">
+                ({countdown}s)
+              </span>
             )}
           </button>
+
 
           {/* Refresh all button */}
           <button
             type="button"
-            onClick={refreshAll}
+            onClick={() => refreshAll(true)}
             disabled={refreshingAll}
             className="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-black/10 px-2 text-xs text-text-primary transition-colors hover:bg-black/5 dark:border-white/10 dark:hover:bg-white/5 disabled:opacity-50"
             title="Refresh all"
           >
-            <span className={`material-symbols-outlined text-[14px] ${refreshingAll ? "animate-spin" : ""}`}>refresh</span>
+            <span
+              className={`material-symbols-outlined text-[14px] ${refreshingAll ? "animate-spin" : ""}`}
+            >
+              refresh
+            </span>
           </button>
         </div>
       </div>
 
       {/* Provider cards: 2 columns, compact */}
+      {expiringFirst && (
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          Expiring-first currently reorders accounts inside the current page.
+          Cross-page ordering still follows backend pagination.
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {sortedConnections.map((conn) => {
           const quota = quotaData[conn.id];
@@ -623,7 +906,10 @@ export default function ProviderLimits() {
 
           // Use table layout for all providers
           const isInactive = conn.isActive === false;
-          const rowBusy = deletingId === conn.id || togglingId === conn.id;
+          const isCodex = conn.provider === "codex";
+          const resetCreditCount = getCodexResetCreditCount(quota);
+          const isResettingLimit = resettingLimitId === conn.id;
+          const rowBusy = deletingId === conn.id || togglingId === conn.id || isResettingLimit;
 
           return (
             <Card
@@ -649,57 +935,152 @@ export default function ProviderLimits() {
                       <h3 className="text-sm font-semibold text-text-primary capitalize truncate">
                         {conn.provider}
                       </h3>
-                      {(() => {
-                        const isEmail = (v) => typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-                        const label = isEmail(conn.email) ? conn.email : (isEmail(conn.name) ? conn.name : conn.name);
-                        return label ? (
-                          <p className="text-xs text-text-muted truncate">{label}</p>
-                        ) : null;
-                      })()}
+                      {getConnectionLabel(conn) ? (
+                        <p className="text-xs text-text-muted truncate">
+                          {getConnectionLabel(conn)}
+                        </p>
+                      ) : null}
+                      {getConnectionSecondaryLabel(conn) ? (
+                        <p className="text-[11px] text-text-muted/80 truncate">
+                          {getConnectionSecondaryLabel(conn)}
+                        </p>
+                      ) : null}
+                      {isCodex && (
+                        <p className="text-[11px] text-text-muted truncate">
+                          Reset eligible: {resetCreditCount}
+                        </p>
+                      )}
+                      {conn.provider === "kiro" && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-semibold text-brand-600 dark:text-brand-300">
+                            {kiroMethodLabel(conn)}
+                          </span>
+                          {kiroRegion(conn) && (
+                            <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-400">
+                              {kiroRegion(conn)}
+                            </span>
+                          )}
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                              isInactive
+                                ? "bg-surface-2 text-text-muted"
+                                : conn.testStatus === "active" || conn.testStatus === "success"
+                                  ? "bg-green-500/10 text-green-600 dark:text-green-400"
+                                  : conn.testStatus === "error" || conn.testStatus === "expired" || conn.testStatus === "unavailable"
+                                    ? "bg-red-500/10 text-red-600 dark:text-red-400"
+                                    : "bg-surface-2 text-text-muted"
+                            }`}
+                          >
+                            {isInactive ? "disabled" : conn.testStatus || "unknown"}
+                          </span>
+                          {conn.providerSpecificData?.profileArn && (
+                            <button
+                              type="button"
+                              onClick={() => copy(conn.providerSpecificData.profileArn, conn.id)}
+                              title={conn.providerSpecificData.profileArn}
+                              className="inline-flex max-w-full items-center gap-1 rounded-full border border-border-subtle px-2 py-0.5 text-[10px] text-text-muted transition-colors hover:text-primary"
+                            >
+                              <span className="material-symbols-outlined text-[12px]">
+                                {copied === conn.id ? "check" : "content_copy"}
+                              </span>
+                              <code className="truncate font-mono">
+                                {conn.providerSpecificData.profileArn}
+                              </code>
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => refreshProvider(conn.id, conn.provider)}
-                      disabled={isLoading || rowBusy}
-                      className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
-                      title="Refresh quota"
-                    >
-                      <span
-                        className={`material-symbols-outlined text-[18px] text-text-muted ${isLoading ? "animate-spin" : ""}`}
+                    {isCodex && (
+                      <Tooltip text={`Codex reset credits remaining: ${resetCreditCount}`}>
+                        <div
+                          className={`hidden h-8 items-center gap-1 rounded-lg border px-2 text-[11px] sm:flex ${
+                            resetCreditCount > 0
+                              ? "border-primary/30 bg-primary/5 text-primary"
+                              : "border-black/10 bg-black/[0.02] text-text-muted dark:border-white/10 dark:bg-white/[0.03]"
+                          }`}
+                        >
+                          <span className="material-symbols-outlined text-[14px]">restart_alt</span>
+                          <span className="tabular-nums">{resetCreditCount}</span>
+                        </div>
+                      </Tooltip>
+                    )}
+                    {isCodex && resetCreditCount > 0 && (
+                      <Tooltip text={`Use one Codex reset credit. Available: ${resetCreditCount}`}>
+                        <button
+                          type="button"
+                          onClick={() => setResetConfirmState({ connection: conn, resetCreditCount })}
+                          disabled={isLoading || rowBusy}
+                          className="flex h-8 items-center gap-1 rounded-lg border border-primary/30 px-2 text-[11px] text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
+                        >
+                          <span className={`material-symbols-outlined text-[15px] ${isResettingLimit ? "animate-spin" : ""}`}>
+                            {isResettingLimit ? "progress_activity" : "bolt"}
+                          </span>
+                          <span className="hidden lg:inline">Reset limit</span>
+                        </button>
+                      </Tooltip>
+                    )}
+                    {conn.provider === "claude" && conn.authType === "oauth" && (
+                      <Tooltip text="When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.">
+                        <button
+                          type="button"
+                          onClick={() => toggleAutoPing(conn.id, !(autoPingMap[conn.id] === true))}
+                          aria-label="Toggle auto-ping"
+                          className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${autoPingMap[conn.id] === true ? "text-primary" : "text-text-muted"}`}
+                        >
+                          <span className="material-symbols-outlined text-[18px]">bolt</span>
+                        </button>
+                      </Tooltip>
+                    )}
+                    <Tooltip text="Refresh quota">
+                      <button
+                        type="button"
+                        onClick={() => refreshProvider(conn.id, conn.provider)}
+                        disabled={isLoading || rowBusy}
+                        aria-label="Refresh quota"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
                       >
-                        refresh
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedConnection(conn);
-                        setShowEditModal(true);
-                      }}
-                      disabled={rowBusy}
-                      className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-text-muted hover:text-primary transition-colors disabled:opacity-50"
-                      title="Edit connection"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">
-                        edit
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteConnection(conn.id)}
-                      disabled={rowBusy}
-                      className="p-1.5 rounded-lg hover:bg-red-500/10 text-red-500 transition-colors disabled:opacity-50"
-                      title="Delete connection"
-                    >
-                      <span
-                        className={`material-symbols-outlined text-[18px] ${deletingId === conn.id ? "animate-pulse" : ""}`}
+                        <span
+                          className={`material-symbols-outlined text-[18px] text-text-muted ${isLoading ? "animate-spin" : ""}`}
+                        >
+                          refresh
+                        </span>
+                      </button>
+                    </Tooltip>
+                    <Tooltip text="Edit connection">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedConnection(conn);
+                          setShowEditModal(true);
+                        }}
+                        disabled={rowBusy}
+                        aria-label="Edit connection"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-text-muted hover:text-primary transition-colors disabled:opacity-50"
                       >
-                        delete
-                      </span>
-                    </button>
+                        <span className="material-symbols-outlined text-[18px]">
+                          edit
+                        </span>
+                      </button>
+                    </Tooltip>
+                    <Tooltip text="Delete connection">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteConnection(conn.id)}
+                        disabled={rowBusy}
+                        aria-label="Delete connection"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-red-500/10 text-red-500 transition-colors disabled:opacity-50"
+                      >
+                        <span
+                          className={`material-symbols-outlined text-[18px] ${deletingId === conn.id ? "animate-pulse" : ""}`}
+                        >
+                          delete
+                        </span>
+                      </button>
+                    </Tooltip>
                     <div
                       className="inline-flex items-center pl-0.5"
                       title={
@@ -740,13 +1121,162 @@ export default function ProviderLimits() {
                     <p className="text-xs text-text-muted">{quota.message}</p>
                   </div>
                 ) : (
-                  <QuotaTable quotas={quota?.quotas} compact />
+                  <QuotaTable
+                    quotas={quota?.quotas}
+                    compact
+                    sortMode="default"
+                    showSortLabel={
+                      conn.provider === "codex" && quotaSortMode !== "default"
+                    }
+                  />
                 )}
               </div>
             </Card>
           );
         })}
       </div>
+
+      <div className="rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2 dark:border-white/10 dark:bg-white/[0.03]">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-text-muted">{connectionsPageSummary}</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={isCustomPageSize ? "custom" : String(pageSize)}
+                onChange={(event) => {
+                  const nextValue = event.target.value;
+                  if (nextValue === "custom") return;
+                  const nextPageSize = Number.parseInt(nextValue, 10);
+                  if (Number.isFinite(nextPageSize)) {
+                    setPage(1);
+                    setPageSize(nextPageSize);
+                    setCustomPageSizeInput(String(nextPageSize));
+                  }
+                }}
+                className="h-8 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+                aria-label="Accounts per page"
+              >
+                {ACCOUNT_PAGE_SIZE_OPTIONS.map((option) => (
+                  <option key={option} value={String(option)}>
+                    {option} / page
+                  </option>
+                ))}
+                <option value="custom">Custom</option>
+              </select>
+              <input
+                type="number"
+                min="1"
+                max={String(ACCOUNT_PAGE_SIZE_MAX)}
+                inputMode="numeric"
+                value={customPageSizeInput}
+                onChange={(event) => setCustomPageSizeInput(event.target.value)}
+                onBlur={() => {
+                  const parsedValue = Number.parseInt(customPageSizeInput, 10);
+                  if (!Number.isFinite(parsedValue)) {
+                    setCustomPageSizeInput(String(pageSize));
+                    return;
+                  }
+                  const nextPageSize = Math.min(ACCOUNT_PAGE_SIZE_MAX, Math.max(1, parsedValue));
+                  setPage(1);
+                  setPageSize(nextPageSize);
+                  setCustomPageSizeInput(String(nextPageSize));
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  const parsedValue = Number.parseInt(customPageSizeInput, 10);
+                  if (!Number.isFinite(parsedValue)) {
+                    setCustomPageSizeInput(String(pageSize));
+                    return;
+                  }
+                  const nextPageSize = Math.min(ACCOUNT_PAGE_SIZE_MAX, Math.max(1, parsedValue));
+                  setPage(1);
+                  setPageSize(nextPageSize);
+                  setCustomPageSizeInput(String(nextPageSize));
+                }}
+                className="h-8 w-20 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+                aria-label="Custom accounts per page"
+                placeholder="Custom"
+              />
+              <span className="text-xs text-text-muted">Page {pagination.page} / {pagination.totalPages}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setPage(1)}
+                disabled={
+                  pagination.page <= 1 || connectionsLoading || refreshingAll
+                }
+                className="flex h-8 items-center rounded-lg border border-black/10 px-3 text-xs text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+              >
+                First Page
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setPage((currentPage) => Math.max(1, currentPage - 1))
+                }
+                disabled={
+                  pagination.page <= 1 || connectionsLoading || refreshingAll
+                }
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-black/10 text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+                aria-label="Previous accounts page"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  chevron_left
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setPage((currentPage) =>
+                    Math.min(pagination.totalPages, currentPage + 1),
+                  )
+                }
+                disabled={
+                  pagination.page >= pagination.totalPages ||
+                  connectionsLoading ||
+                  refreshingAll
+                }
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-black/10 text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+                aria-label="Next accounts page"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  chevron_right
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage(pagination.totalPages)}
+                disabled={
+                  pagination.page >= pagination.totalPages ||
+                  connectionsLoading ||
+                  refreshingAll
+                }
+                className="flex h-8 items-center rounded-lg border border-black/10 px-3 text-xs text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+              >
+                Last Page
+              </button>
+            </div>
+          </div>
+        </div>
+
+      <ConfirmModal
+        isOpen={Boolean(resetConfirmState)}
+        onClose={() => {
+          if (!resettingLimitId) setResetConfirmState(null);
+        }}
+        onConfirm={async () => {
+          const connection = resetConfirmState?.connection;
+          if (!connection) return;
+          await handleResetCodexLimit(connection.id, connection.provider);
+          setResetConfirmState(null);
+        }}
+        title="Reset Codex limit?"
+        message={`Use 1 Codex reset credit for ${getConnectionLabel(resetConfirmState?.connection || {}) || "this account"}. This cannot be undone. Remaining credits: ${resetConfirmState?.resetCreditCount ?? 0}.`}
+        confirmText="Reset limit"
+        cancelText="Cancel"
+        variant="danger"
+        loading={Boolean(resettingLimitId)}
+      />
 
       <EditConnectionModal
         isOpen={showEditModal}

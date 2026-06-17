@@ -17,6 +17,7 @@ export { default as OAuthModal } from "./OAuthModal";
 export { default as ModelSelectModal } from "./ModelSelectModal";
 export { default as ManualConfigModal } from "./ManualConfigModal";
 export { default as ComboFormModal } from "./ComboFormModal";
+export { default as McpMarketplaceModal } from "./McpMarketplaceModal";
 export { default as UsageStats } from "./UsageStats";
 export { default as LanguageSwitcher } from "./LanguageSwitcher";
 export { default as NineRemoteButton } from "./NineRemoteButton";
@@ -35,6 +36,7 @@ export { default as NoAuthProxyCard } from "./NoAuthProxyCard";
 export { default as SegmentedControl } from "./SegmentedControl";
 export { default as Tooltip } from "./Tooltip";
 export { default as ProviderInfoCard } from "./ProviderInfoCard";
+export { default as CapacityBadges } from "./CapacityBadges";
 
 // Layouts
 export * from "./layouts";

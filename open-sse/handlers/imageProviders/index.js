@@ -10,12 +10,15 @@ import falAi from "./falAi.js";
 import stabilityAi from "./stabilityAi.js";
 import blackForestLabs from "./blackForestLabs.js";
 import runwayml from "./runwayml.js";
+import cloudflareAi from "./cloudflareAi.js";
 
 const ADAPTERS = {
   openai: createOpenAIAdapter("openai"),
   minimax: createOpenAIAdapter("minimax"),
   openrouter: createOpenAIAdapter("openrouter"),
   recraft: createOpenAIAdapter("recraft"),
+  "vercel-ai-gateway": createOpenAIAdapter("vercel-ai-gateway"),
+  xai: createOpenAIAdapter("xai"),
   gemini,
   codex,
   sdwebui,
@@ -26,6 +29,7 @@ const ADAPTERS = {
   "stability-ai": stabilityAi,
   "black-forest-labs": blackForestLabs,
   runwayml,
+  "cloudflare-ai": cloudflareAi,
 };
 
 export function getImageAdapter(provider) {

@@ -3,7 +3,10 @@
 import { useState, useMemo, useEffect } from "react";
 import PropTypes from "prop-types";
 import Modal from "./Modal";
-import { getModelsByProviderId } from "@/shared/constants/models";
+import ProviderIcon from "./ProviderIcon";
+import CapacityBadges from "./CapacityBadges";
+import { useModelCaps } from "@/shared/hooks/useModelCaps";
+import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
@@ -39,6 +42,7 @@ export default function ModelSelectModal({
       return kinds.includes(kindFilter);
     });
   }, [activeProviders, kindFilter]);
+  const { getCaps } = useModelCaps();
   const [searchQuery, setSearchQuery] = useState("");
   const [combos, setCombos] = useState([]);
   const [providerNodes, setProviderNodes] = useState([]);
@@ -122,12 +126,11 @@ export default function ModelSelectModal({
     // For these kinds, providers without hardcoded models can still be picked (provider-as-model fallback)
     const ALLOW_PROVIDER_FALLBACK_KINDS = new Set(["tts", "image", "webFetch"]);
 
-    // Filter a models[] array by kindFilter (keep only matching m.type)
+    // Filter a models[] array by kindFilter (keep only matching kind)
     const filterByKind = (models) => {
-      // No kindFilter → LLM context: keep only LLM models (no type or type === "llm")
-      if (!kindFilter) return models.filter((m) => m.isPlaceholder || !m.type || m.type === "llm");
+      if (!kindFilter) return models.filter((m) => m.isPlaceholder || !getModelKind(m) || getModelKind(m) === "llm");
       if (!TYPED_KINDS.has(kindFilter)) return models;
-      return models.filter((m) => m.isPlaceholder || m.type === kindFilter);
+      return models.filter((m) => m.isPlaceholder || getModelKind(m) === kindFilter);
     };
 
     // Get all active provider IDs from connections (filtered by kindFilter if set)
@@ -180,13 +183,21 @@ export default function ModelSelectModal({
         let combined = aliasModels;
         if (kindFilter && TYPED_KINDS.has(kindFilter)) {
           combined = getModelsByProviderId(providerId)
-            .filter((m) => m.type === kindFilter)
-            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type }));
+            .filter((m) => getModelKind(m) === kindFilter)
+            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }));
           // Fallback: provider-as-model when no hardcoded models match (tts/image/webFetch only)
           if (combined.length === 0 && ALLOW_PROVIDER_FALLBACK_KINDS.has(kindFilter)) {
             const supports = (providerInfo.serviceKinds || ["llm"]).includes(kindFilter);
             if (supports) combined = [{ id: providerId, name: providerInfo.name, value: alias }];
           }
+        } else {
+          // LLM/null kind: merge hardcoded models (e.g. mimo-free → mimo-auto) with aliases
+          const seen = new Set(aliasModels.map((m) => m.value));
+          const hardcoded = getModelsByProviderId(providerId)
+            .filter((m) => !getModelKind(m) || getModelKind(m) === "llm")
+            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
+            .filter((m) => !seen.has(m.value));
+          combined = [...aliasModels, ...hardcoded];
         }
 
         if (combined.length > 0) {
@@ -207,7 +218,7 @@ export default function ModelSelectModal({
         // Find connection object to get prefix synchronously without waiting for providerNodes fetch
         const connection = activeProviders.find(p => p.provider === providerId);
         const matchedNode = providerNodes.find(node => node.id === providerId);
-        const displayName = connection?.name || matchedNode?.name || providerInfo.name;
+        const displayName = matchedNode?.name || connection?.name || providerInfo.name;
         const nodePrefix = connection?.providerSpecificData?.prefix || matchedNode?.prefix || providerId;
 
         // Aliases are stored using the raw providerId as key (e.g. "openai-compatible-chat-<uuid>/glm-4.7"),
@@ -262,7 +273,7 @@ export default function ModelSelectModal({
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [
-          ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type })),
+          ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) })),
           ...customAliasModels,
           ...customRegisteredModels,
         ];
@@ -317,32 +328,37 @@ export default function ModelSelectModal({
     return combos.filter(c => c.name.toLowerCase().includes(query));
   }, [combos, searchQuery, kindFilter]);
 
+  // Sort models alphabetically, with added models floated to top
+  const sortModels = (models) => {
+    const added = models.filter(m => addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    const rest = models.filter(m => !addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    return [...added, ...rest];
+  };
+
   // Filter models by search query
   const filteredGroups = useMemo(() => {
-    if (!searchQuery.trim()) return groupedModels;
+    const query = searchQuery.trim().toLowerCase();
 
-    const query = searchQuery.toLowerCase();
     const filtered = {};
-
     Object.entries(groupedModels).forEach(([providerId, group]) => {
-      const matchedModels = group.models.filter(
-        (m) =>
-          m.name.toLowerCase().includes(query) ||
-          m.id.toLowerCase().includes(query)
-      );
-
-      const providerNameMatches = group.name.toLowerCase().includes(query);
-
-      if (matchedModels.length > 0 || providerNameMatches) {
-        filtered[providerId] = {
-          ...group,
-          models: matchedModels,
-        };
+      let models = group.models;
+      if (query) {
+        const providerNameMatches = group.name.toLowerCase().includes(query);
+        models = models.filter(
+          (m) =>
+            m.name.toLowerCase().includes(query) ||
+            m.id.toLowerCase().includes(query)
+        );
+        if (models.length === 0 && !providerNameMatches) return;
       }
+      filtered[providerId] = {
+        ...group,
+        models: sortModels(models),
+      };
     });
 
     return filtered;
-  }, [groupedModels, searchQuery]);
+  }, [groupedModels, searchQuery, addedModelValues]);
 
   const handleSelect = (model) => {
     const value = model?.value || model?.name || model;
@@ -370,7 +386,14 @@ export default function ModelSelectModal({
       title={title}
       size="md"
       className="p-4!"
+      footer={null}
     >
+      {/* Info bar */}
+      <div className="flex items-center gap-2 mb-3 px-2.5 py-2 bg-primary/8 border border-primary/20 rounded-lg text-xs text-text-muted">
+        <span className="material-symbols-outlined text-primary shrink-0" style={{ fontSize: "14px" }}>info</span>
+        <span>Click to add, click again to remove. Changes are saved automatically.</span>
+      </div>
+
       {/* Search - compact */}
       <div className="mb-3">
         <div className="relative">
@@ -409,13 +432,13 @@ export default function ModelSelectModal({
                       ${isSelected
                         ? "bg-primary text-white border-primary"
                         : addedModelValues.includes(combo.name)
-                          ? "bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-400 hover:border-green-500/50"
+                          ? "bg-primary border-primary text-white hover:bg-primary-hover"
                           : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
                       }
                     `}
                   >
                     {addedModelValues.includes(combo.name) && (
-                      <span className="material-symbols-outlined text-[12px]">check_circle</span>
+                      <span className="material-symbols-outlined leading-none" style={{ fontSize: "10px" }}>check</span>
                     )}
                     {combo.name}
                   </button>
@@ -430,9 +453,12 @@ export default function ModelSelectModal({
           <div key={providerId}>
             {/* Provider header */}
             <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface py-0.5">
-              <div
-                className="w-2 h-2 rounded-full"
-                style={{ backgroundColor: group.color }}
+              <ProviderIcon
+                src={`/providers/${providerId}.png`}
+                alt={group.name}
+                size={14}
+                fallbackText={(group.name || providerId).slice(0, 2).toUpperCase()}
+                fallbackColor={group.color}
               />
               <span className="text-xs font-medium text-primary">
                 {group.name}
@@ -458,14 +484,14 @@ export default function ModelSelectModal({
                         : isSelected
                           ? "bg-primary text-white border-primary"
                           : addedModelValues.includes(model.value)
-                            ? "bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-400 hover:border-green-500/50"
+                            ? "bg-primary border-primary text-white hover:bg-primary-hover"
                             : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
                       }
                     `}
                   >
                     <span className="flex items-center gap-1">
                       {addedModelValues.includes(model.value) && !isPlaceholder && (
-                        <span className="material-symbols-outlined text-[12px]">check_circle</span>
+                        <span className="material-symbols-outlined leading-none" style={{ fontSize: "10px" }}>check</span>
                       )}
                       {isPlaceholder ? (
                         <>
@@ -476,9 +502,13 @@ export default function ModelSelectModal({
                         <>
                           {model.name}
                           <span className="text-[9px] opacity-60 font-normal">custom</span>
+                          <CapacityBadges caps={getCaps(model.value)} />
                         </>
                       ) : (
-                        model.name
+                        <>
+                          {model.name}
+                          <CapacityBadges caps={getCaps(model.value)} />
+                        </>
                       )}
                     </span>
                   </button>

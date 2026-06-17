@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FREE_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers";
 
@@ -182,6 +182,7 @@ const TABLE_OPTIONS = [
 ];
 
 const PERIODS = [
+  { value: "today", label: "Today" },
   { value: "24h", label: "24h" },
   { value: "7d", label: "7D" },
   { value: "30d", label: "30D" },
@@ -201,16 +202,25 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [tableView, setTableView] = useState("model");
   const [viewMode, setViewMode] = useState("costs");
   const [providers, setProviders] = useState([]);
-  const [periodLocal, setPeriodLocal] = useState("7d");
+  const [periodLocal, setPeriodLocal] = useState("today");
+  const isInitialLoad = useRef(true);
+  const hasLoadedStats = useRef(false);
   const period = periodProp ?? periodLocal;
   const setPeriod = setPeriodProp ?? setPeriodLocal;
 
   // Fetch connected providers once, deduplicate by provider type
   // Always include noAuth free providers (e.g. opencode) regardless of connections
   useEffect(() => {
-    fetch("/api/providers")
-      .then((r) => r.ok ? r.json() : null)
-      .then((d) => {
+    Promise.all([
+      fetch("/api/providers").then((r) => r.ok ? r.json() : null),
+      fetch("/api/provider-nodes").then((r) => r.ok ? r.json() : null),
+    ])
+      .then(([d, nodesData]) => {
+        // Build node name lookup for custom providers
+        const nodeNameMap = {};
+        for (const node of (nodesData?.nodes || [])) {
+          nodeNameMap[node.id] = node.name;
+        }
         const seen = new Set();
         const unique = (d?.connections || []).filter((c) => {
           if (c.isActive === false) return false;
@@ -218,7 +228,10 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           if (seen.has(c.provider)) return false;
           seen.add(c.provider);
           return true;
-        });
+        }).map((c) => ({
+          ...c,
+          nodeName: nodeNameMap[c.provider] || null,
+        }));
         const noAuthProviders = Object.values(FREE_PROVIDERS)
           .filter((p) => p.noAuth && !seen.has(p.id) && isLLMProvider(p.id))
           .map((p) => ({ provider: p.id, name: p.name }));
@@ -230,20 +243,27 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   // Fetch filtered stats via REST when period changes
   useEffect(() => {
     // First load: show full spinner; subsequent: show subtle fetching indicator
-    if (!stats) setLoading(true);
-    else setFetching(true);
+    if (isInitialLoad.current) {
+      isInitialLoad.current = false;
+      setLoading(true);
+    } else {
+      setFetching(true);
+    }
 
     fetch(`/api/usage/stats?period=${period}`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
-        if (data) setStats((prev) => ({ ...prev, ...data }));
+        if (data) {
+          hasLoadedStats.current = true;
+          setStats((prev) => ({ ...prev, ...data }));
+        }
       })
       .catch(() => {})
       .finally(() => {
         setLoading(false);
         setFetching(false);
       });
-  }, [period]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [period]);
 
   // SSE connection - real-time updates for activeRequests + recentRequests only
   useEffect(() => {
@@ -253,14 +273,17 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       try {
         const data = JSON.parse(e.data);
         // Always merge only real-time fields, never overwrite full stats from REST
-        setStats((prev) => ({
-          ...(prev || {}),
-          activeRequests: data.activeRequests,
-          recentRequests: data.recentRequests,
-          errorProvider: data.errorProvider,
-          pending: data.pending,
-        }));
-        setLoading(false);
+        setStats((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            activeRequests: data.activeRequests,
+            recentRequests: data.recentRequests,
+            errorProvider: data.errorProvider,
+            pending: data.pending,
+          };
+        });
+        if (hasLoadedStats.current) setLoading(false);
       } catch (err) {
         console.error("[SSE CLIENT] parse error:", err);
       }
@@ -412,7 +435,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       {/* Period selector (hidden when controlled by parent) */}
       {!hidePeriodSelector && (
         <div className="flex w-full items-center gap-2 sm:w-auto sm:self-end">
-          <div className="grid flex-1 grid-cols-4 items-center gap-1 rounded-lg border border-border bg-bg-subtle p-1 sm:flex sm:flex-none">
+          <div className="grid flex-1 grid-cols-5 items-center gap-1 rounded-lg border border-border bg-bg-subtle p-1 sm:flex sm:flex-none">
             {PERIODS.map((p) => (
               <button
                 key={p.value}
@@ -455,7 +478,8 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           <select
             value={tableView}
             onChange={(e) => setTableView(e.target.value)}
-            className="w-full rounded-lg border border-border bg-bg-subtle px-3 py-1.5 text-sm font-medium text-text focus:outline-none focus:ring-2 focus:ring-primary/50 sm:w-auto"
+            className="w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-main focus:outline-none focus:ring-2 focus:ring-primary/50 sm:w-auto"
+            style={{ colorScheme: 'auto' }}
           >
             {TABLE_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
