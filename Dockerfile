@@ -12,6 +12,7 @@ RUN npm install
 
 COPY . ./
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_STANDALONE=1
 RUN npm run build
 
 FROM ${NODE_IMAGE} AS runner
