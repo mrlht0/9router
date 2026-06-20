@@ -5,8 +5,9 @@ import { TUNNEL_DIR, ensureTunnelDir } from "../shared/state.js";
 const PID_FILE = path.join(TUNNEL_DIR, "cloudflared.pid");
 
 export function savePid(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
   ensureTunnelDir();
-  fs.writeFileSync(PID_FILE, pid.toString());
+  fs.writeFileSync(PID_FILE, String(pid));
 }
 
 export function loadPid() {

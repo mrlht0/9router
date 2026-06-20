@@ -28,12 +28,13 @@ export default function ToolDetailClient({ toolId, machineId }) {
 
   useEffect(() => {
     let mounted = true;
-    (async () => {
+
+    const load = async () => {
       try {
         const [provRes, settingsRes, tunnelRes, keysRes] = await Promise.all([
           fetch("/api/providers"),
           fetch("/api/settings"),
-          fetch("/api/tunnel/status"),
+          fetch("/api/tunnel/status", { cache: "no-store" }),
           fetch("/api/keys"),
         ]);
         if (!mounted) return;
@@ -47,9 +48,9 @@ export default function ToolDetailClient({ toolId, machineId }) {
         }
         if (tunnelRes.ok) {
           const data = await tunnelRes.json();
-          setTunnelEnabled(!!(data.tunnel?.enabled || data.tunnel?.settingsEnabled));
+          setTunnelEnabled(!!(data.tunnel?.settingsEnabled || data.tunnel?.enabled));
           setTunnelPublicUrl(data.tunnel?.publicUrl || "");
-          setTailscaleEnabled(!!(data.tailscale?.enabled || data.tailscale?.settingsEnabled));
+          setTailscaleEnabled(!!(data.tailscale?.settingsEnabled || data.tailscale?.enabled));
           setTailscaleUrl(data.tailscale?.tunnelUrl || "");
         }
         if (keysRes.ok) {
@@ -61,8 +62,11 @@ export default function ToolDetailClient({ toolId, machineId }) {
       } finally {
         if (mounted) setLoading(false);
       }
-    })();
-    return () => { mounted = false; };
+    };
+
+    load();
+    const id = setInterval(() => { if (!document.hidden) load(); }, 5000);
+    return () => { mounted = false; clearInterval(id); };
   }, []);
 
   const getActiveProviders = () => connections.filter(c => c.isActive !== false);

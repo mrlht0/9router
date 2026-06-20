@@ -421,6 +421,7 @@ export default function APIPageClient({ machineId }) {
       setTunnelUrl(url);
       setTunnelPublicUrl(data.publicUrl || "");
       await pingTunnelHealth(data.publicUrl, url);
+      syncTunnelStatus();
     } catch (error) {
       setTunnelStatus({ type: "error", message: error.message });
     } finally {
@@ -439,8 +440,13 @@ export default function APIPageClient({ machineId }) {
       if (res.ok) {
         setTunnelEnabled(false);
         setTunnelUrl("");
+        setTunnelPublicUrl("");
+        setTunnelReachable(false);
+        tunnelClientReachableRef.current = false;
+        tunnelMissRef.current = 0;
         setShowDisableTunnelModal(false);
         setTunnelStatus({ type: "success", message: "Tunnel disabled" });
+        syncTunnelStatus();
       } else {
         setTunnelStatus({ type: "error", message: data.error || "Failed to disable tunnel" });
       }

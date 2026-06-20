@@ -1,9 +1,12 @@
-import { loadState, saveState, generateShortId } from "../shared/state.js";
+import { getTunnelState, saveTunnelState, generateShortId } from "../shared/state.js";
 import { spawnQuickTunnel, killCloudflared, isCloudflaredRunning, setUnexpectedExitHandler } from "./cloudflared.js";
 import { clearPid } from "./pid.js";
 import { waitForHealth, probeUrlAlive } from "./healthCheck.js";
 import { WORKER_URL } from "./config.js";
-import { getSettings, updateSettings } from "@/lib/localDb";
+import { getSettings, updateSettings, runWithUserScope } from "@/lib/localDb";
+
+const getGlobalSettings = () => runWithUserScope(null, async () => await getSettings());
+const updateGlobalSettings = (updates) => runWithUserScope(null, async () => await updateSettings(updates));
 
 const svc = {
   cancelToken: { cancelled: false },
@@ -40,7 +43,7 @@ export async function enableTunnel(localPort = 20128) {
 
   try {
     if (isCloudflaredRunning()) {
-      const existing = loadState();
+      const existing = await getTunnelState();
       if (existing?.tunnelUrl && existing?.shortId) {
         const publicUrl = `https://r${existing.shortId}.abc-tunnel.us`;
         // Reuse only if BOTH direct + public URL alive (avoid stale socket after network change)
@@ -60,15 +63,15 @@ export async function enableTunnel(localPort = 20128) {
     console.log("[Tunnel] killed existing cloudflared");
     throwIfCancelled(token);
 
-    const existing = loadState();
+    const existing = await getTunnelState();
     const shortId = existing?.shortId || generateShortId();
 
     const onUrlUpdate = async (url) => {
       if (token.cancelled) return;
       console.log(`[Tunnel] url updated: ${url}`);
       await registerTunnelUrl(shortId, url);
-      saveState({ shortId, tunnelUrl: url });
-      await updateSettings({ tunnelEnabled: true, tunnelUrl: url });
+      await saveTunnelState({ shortId, tunnelUrl: url });
+      await updateGlobalSettings({ tunnelEnabled: true, tunnelUrl: url });
     };
 
     // Register exit handler BEFORE spawn so it fires even on early exit
@@ -83,22 +86,45 @@ export async function enableTunnel(localPort = 20128) {
 
     const publicUrl = `https://r${shortId}.abc-tunnel.us`;
     await registerTunnelUrl(shortId, tunnelUrl);
-    saveState({ shortId, tunnelUrl });
-    await updateSettings({ tunnelEnabled: true, tunnelUrl });
+    await saveTunnelState({ shortId, tunnelUrl });
+    await updateGlobalSettings({ tunnelEnabled: true, tunnelUrl });
     console.log(`[Tunnel] registered shortId=${shortId} publicUrl=${publicUrl}`);
 
-    // Verify publicUrl first (worker route is reliable; direct *.trycloudflare.com DNS may lag)
-    await waitForHealth(publicUrl, token);
-    console.log("[Tunnel] public URL healthy");
-    // Direct tunnel probe is best-effort: DNS for *.trycloudflare.com can be slow/blocked
-    if (!(await probeUrlAlive(tunnelUrl))) {
+    // Prefer public short URL, but do not fail the whole enable flow if only the
+    // worker-mapped public URL is still propagating while raw trycloudflare works.
+    let publicHealthy = false;
+    try {
+      await waitForHealth(publicUrl, token);
+      publicHealthy = true;
+      console.log("[Tunnel] public URL healthy");
+    } catch (error) {
+      console.warn(`[Tunnel] public URL health pending: ${error.message}`);
+    }
+
+    const directHealthy = await probeUrlAlive(tunnelUrl);
+    if (directHealthy) {
+      console.log("[Tunnel] direct URL healthy");
+    } else if (publicHealthy) {
       console.warn("[Tunnel] direct URL not reachable yet, continuing via publicUrl");
     } else {
-      console.log("[Tunnel] direct URL healthy");
+      console.warn("[Tunnel] neither public nor direct URL is healthy yet; returning success with pending health state");
     }
 
     console.log("[Tunnel] enable success");
-    return { success: true, tunnelUrl, shortId, publicUrl };
+    return {
+      success: true,
+      tunnelUrl,
+      shortId,
+      publicUrl,
+      publicHealthy,
+      directHealthy,
+      healthPending: !publicHealthy && !directHealthy,
+      warning: !publicHealthy && directHealthy
+        ? "Public short URL is still propagating. Raw tunnel URL is already available."
+        : (!publicHealthy && !directHealthy
+          ? "Tunnel process started, but public/direct health checks are still pending."
+          : "")
+    };
   } catch (e) {
     // Suppress noise when spawn was deliberately killed (restart/disable superseded it)
     if (!/cloudflared killed|tunnel cancelled/.test(e.message)) {
@@ -119,10 +145,10 @@ export async function disableTunnel() {
   try { killCloudflared(svc.activeLocalPort); } catch (e) { console.warn(`[Tunnel] kill warn: ${e.message}`); }
   clearPid();
 
-  const state = loadState();
-  if (state) saveState({ shortId: state.shortId, tunnelUrl: null });
+  const state = await getTunnelState();
+  if (state?.shortId) await saveTunnelState({ shortId: state.shortId, tunnelUrl: "" });
 
-  await updateSettings({ tunnelEnabled: false, tunnelUrl: "" });
+  await updateGlobalSettings({ tunnelEnabled: false, tunnelUrl: "" });
   // Force-clear flags so a subsequent enable is not blocked by a stuck spawnInProgress
   svc.spawnInProgress = false;
   svc.activeLocalPort = null;
@@ -130,9 +156,9 @@ export async function disableTunnel() {
 }
 
 export async function getTunnelStatus() {
-  const settings = await getSettings();
+  const settings = await getGlobalSettings();
   const settingsEnabled = settings.tunnelEnabled === true;
-  const state = loadState();
+  const state = await getTunnelState();
   const shortId = state?.shortId || "";
   const publicUrl = shortId ? `https://r${shortId}.abc-tunnel.us` : "";
   const tunnelUrl = state?.tunnelUrl || "";

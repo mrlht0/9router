@@ -2,13 +2,24 @@ import { Inter } from "next/font/google";
 import "material-symbols/outlined.css";
 import "./globals.css";
 import { ThemeProvider } from "@/shared/components/ThemeProvider";
-import "@/lib/network/initOutboundProxy"; // Auto-initialize outbound proxy env
-import "@/shared/services/bootstrap"; // Auto-run initializeApp (watchdog, auto-resume tunnel)
 import { initConsoleLogCapture } from "@/lib/consoleLogBuffer";
 import { RuntimeI18nProvider } from "@/i18n/RuntimeI18nProvider";
 
 // Hook console immediately at module load time (server-side only, runs once)
 initConsoleLogCapture();
+
+const isBuildPhase = process.env.NEXT_PHASE === "phase-production-build"
+  || process.env.NEXT_PHASE === "phase-export"
+  || process.env.NEXT_PHASE === "phase-static";
+
+if (!isBuildPhase && typeof window === "undefined") {
+  import("@/lib/network/initOutboundProxy").catch((error) => {
+    console.error("[Layout] outbound proxy init import failed:", error?.message || error);
+  });
+  import("@/shared/services/bootstrap").catch((error) => {
+    console.error("[Layout] bootstrap import failed:", error?.message || error);
+  });
+}
 
 const inter = Inter({
   subsets: ["latin"],

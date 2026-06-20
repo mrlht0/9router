@@ -8,19 +8,22 @@ const tracingRoot = process.env.NEXT_TRACING_ROOT_MODE === "workspace"
   ? join(projectRoot, "..")
   : projectRoot;
 const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE || "128mb";
+const isStandalone = process.env.NEXT_STANDALONE === "1";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  output: "standalone",
+  ...(isStandalone ? { output: "standalone" } : {}),
   serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite"],
   turbopack: {
     root: tracingRoot
   },
-  outputFileTracingRoot: tracingRoot,
-  outputFileTracingExcludes: {
-    "*": ["./gitbook/**/*"]
-  },
+  ...(isStandalone ? { outputFileTracingRoot: tracingRoot } : {}),
+  ...(isStandalone ? {
+    outputFileTracingExcludes: {
+      "*": ["./gitbook/**/*"]
+    }
+  } : {}),
   images: {
     unoptimized: true
   },

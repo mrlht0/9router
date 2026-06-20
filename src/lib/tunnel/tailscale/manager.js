@@ -1,10 +1,13 @@
-import { loadState, generateShortId } from "../shared/state.js";
+import { getTunnelState, generateShortId } from "../shared/state.js";
 import { startFunnel, stopFunnel, isTailscaleRunning, isTailscaleRunningStrict, isTailscaleLoggedIn, isTailscaleLoggedInStrict, startLogin, startDaemonWithPassword, provisionCert } from "./tailscale.js";
 import { waitForHealth } from "./healthCheck.js";
-import { getSettings, updateSettings } from "@/lib/localDb";
+import { getSettings, updateSettings, runWithUserScope } from "@/lib/localDb";
 import { getCachedPassword, loadEncryptedPassword, initDbHooks } from "@/mitm/manager";
 
-initDbHooks(getSettings, updateSettings);
+const getGlobalSettings = () => runWithUserScope(null, async () => await getSettings());
+const updateGlobalSettings = (updates) => runWithUserScope(null, async () => await updateSettings(updates));
+
+initDbHooks(getGlobalSettings, updateGlobalSettings);
 
 const svc = {
   cancelToken: { cancelled: false },
@@ -33,7 +36,7 @@ export async function enableTailscale(localPort = 20128) {
     console.log("[Tailscale] daemon ready");
     throwIfCancelled(token);
 
-    const existing = loadState();
+    const existing = await getTunnelState();
     const shortId = existing?.shortId || generateShortId();
     const tsHostname = shortId;
 
@@ -78,7 +81,7 @@ export async function enableTailscale(localPort = 20128) {
       return { success: false, error: "Tailscale not connected. Device may have been removed. Please re-login." };
     }
 
-    await updateSettings({ tailscaleEnabled: true, tailscaleUrl: result.tunnelUrl });
+    await updateGlobalSettings({ tailscaleEnabled: true, tailscaleUrl: result.tunnelUrl });
     console.log(`[Tailscale] funnel up: ${result.tunnelUrl}`);
 
     // Provision TLS cert so Funnel can serve HTTPS (non-fatal if fails)
@@ -108,12 +111,12 @@ export async function disableTailscale() {
   console.log("[Tailscale] disable");
   svc.cancelToken.cancelled = true;
   stopFunnel();
-  await updateSettings({ tailscaleEnabled: false, tailscaleUrl: "" });
+  await updateGlobalSettings({ tailscaleEnabled: false, tailscaleUrl: "" });
   return { success: true };
 }
 
 export async function getTailscaleStatus() {
-  const settings = await getSettings();
+  const settings = await getGlobalSettings();
   const settingsEnabled = settings.tailscaleEnabled === true;
   const tunnelUrl = settings.tailscaleUrl || "";
   // Skip probes entirely when disabled; check login before running (device removed = not logged in)
