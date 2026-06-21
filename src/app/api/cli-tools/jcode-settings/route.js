@@ -113,7 +113,7 @@ export async function GET() {
   if (!isInstalled) {
     return NextResponse.json({
       installed: false,
-      message: "jcode not installed. Install via: curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash",
+      message: "jcode not installed. Install from https://github.com/1jehuang/jcode, then retry.",
     });
   }
 

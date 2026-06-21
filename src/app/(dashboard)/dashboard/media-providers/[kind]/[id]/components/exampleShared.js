@@ -25,8 +25,8 @@ export const KIND_EXAMPLE_CONFIG = {
   },
   webFetch: {
     inputLabel: "URL",
-    inputPlaceholder: "https://example.com",
-    defaultInput: "https://example.com",
+    inputPlaceholder: "https://example.invalid",
+    defaultInput: "https://example.invalid",
     bodyKey: "url",
     defaultResponse: `{\n  "content": "...",\n  "title": "...",\n  "url": "..."\n}`,
     extraFields: [
@@ -53,7 +53,7 @@ export const KIND_EXAMPLE_CONFIG = {
   },
   imageToText: {
     inputLabel: "Image URL",
-    inputPlaceholder: "https://example.com/image.png",
+    inputPlaceholder: "https://image-source.invalid/image.png",
     defaultInput: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/1200px-Cat03.jpg",
     bodyKey: "url",
     extraBody: { prompt: "Describe this image in detail" },

@@ -13,7 +13,6 @@ const COLORS = {
   cyan: "\x1b[36m"
 };
 
-const DEFAULT_PASSWORD = "123456";
 
 /**
  * Show settings menu (tunnel + RTK + reset password)
@@ -161,11 +160,10 @@ async function toggleRtk(currentlyOn) {
 }
 
 /**
- * Reset dashboard password to default via server API (writes the live SQLite DB).
- * After reset, user can log in with the default password "123456".
+ * Clear the legacy dashboard password hash via server API.
  */
 async function resetPassword() {
-  const ok = await confirm(`Reset dashboard password to default "${DEFAULT_PASSWORD}"?`);
+  const ok = await confirm("Clear the legacy dashboard password hash?");
   if (!ok) {
     showStatus("Cancelled", "info");
     await pause();
@@ -174,7 +172,7 @@ async function resetPassword() {
 
   const result = await api.resetPassword();
   if (result.success) {
-    showStatus(`Password reset. Default: ${DEFAULT_PASSWORD}`, "success");
+    showStatus("Legacy password hash cleared", "success");
   } else {
     showStatus(`Failed to reset password: ${result.error}`, "error");
   }
@@ -182,3 +180,4 @@ async function resetPassword() {
 }
 
 module.exports = { showSettingsMenu };
+

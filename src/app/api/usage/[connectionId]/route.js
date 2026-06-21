@@ -151,6 +151,7 @@ export async function GET(request, { params }) {
       connectionProxyUrl: proxyConfig.connectionProxyUrl || "",
       connectionNoProxy: proxyConfig.connectionNoProxy || "",
       vercelRelayUrl: proxyConfig.vercelRelayUrl || "",
+      relaySecret: proxyConfig.relaySecret || "",
       strictProxy: false,
     };
 

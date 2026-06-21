@@ -347,7 +347,7 @@ amp --model "{{model}}"
       },
       {
         type: "warning",
-        text: "Requires jcode installed. Install via: curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash"
+        text: "Requires jcode installed. Install from https://github.com/1jehuang/jcode."
       },
     ],
     defaultModels: [

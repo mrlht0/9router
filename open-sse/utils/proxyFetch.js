@@ -303,6 +303,8 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       "x-relay-target": `${parsed.protocol}//${parsed.host}`,
       "x-relay-path": `${parsed.pathname}${parsed.search}`,
     };
+    const relaySecret = normalizeString(proxyOptions?.relaySecret);
+    if (relaySecret) relayHeaders["x-relay-secret"] = relaySecret;
     return originalFetch(vercelRelayUrl, { ...options, headers: relayHeaders });
   }
 

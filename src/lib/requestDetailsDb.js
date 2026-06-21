@@ -9,7 +9,8 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
 const DEFAULT_MAX_JSON_SIZE = 5 * 1024; // 5KB default, configurable via settings
 const CONFIG_CACHE_TTL_MS = 5000;
-const MAX_TOTAL_DB_SIZE = 50 * 1024 * 1024; // 50MB hard limit for total DB file
+const MAX_TOTAL_DB_SIZE = 50 * 1024 * 1024; // 50MB hard limit for total DB payload
+const RETENTION_MONTHS = 5;
 const DB_FILE = path.join(DATA_DIR, "request-details.json");
 
 if (!fs.existsSync(DATA_DIR)) {
@@ -22,12 +23,30 @@ async function resolveOwnerId() {
   return await getCurrentUserScopeId();
 }
 
+function getRetentionCutoffTime() {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - RETENTION_MONTHS);
+  return cutoff.getTime();
+}
+
+function pruneRecords(records) {
+  const cutoffTime = getRetentionCutoffTime();
+  return records.filter((record) => new Date(record.timestamp || 0).getTime() >= cutoffTime);
+}
+
 async function getDb() {
-  const pgDb = await createDocumentDb("requestDetailsDb", { records: [] }, DB_FILE);
+  const pgDb = await createDocumentDb("requestDetailsDb", { records: [] }, DB_FILE, {
+    preferredBackends: ["postgres"],
+    syncBackends: false,
+    seedFromFile: false,
+  });
   if (!pgDb.data?.records) {
     pgDb.data = { records: [] };
     await pgDb.write();
   }
+  const before = pgDb.data.records.length;
+  pgDb.data.records = pruneRecords(pgDb.data.records);
+  if (pgDb.data.records.length !== before) await pgDb.write();
   return pgDb;
 }
 
@@ -157,6 +176,7 @@ async function flushToDatabase() {
     }
 
     // Keep only latest maxRecords (sorted by timestamp desc)
+    db.data.records = pruneRecords(db.data.records);
     db.data.records.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     if (db.data.records.length > config.maxRecords) {
       db.data.records = db.data.records.slice(0, config.maxRecords);
@@ -249,3 +269,4 @@ function ensureShutdownHandler() {
 }
 
 ensureShutdownHandler();
+

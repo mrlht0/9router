@@ -172,6 +172,8 @@ async function fetchProjectId(accessToken, signal) {
     const projectId = extractProjectId(data);
     if (projectId) return projectId;
 
+    console.warn(`[ProjectId] loadCodeAssist returned no project_id (${describeResponseShape(data)}), trying onboardUser`);
+
     // Determine the tier to use for onboarding
     let tierID = "legacy-tier";
     if (Array.isArray(data.allowedTiers)) {
@@ -235,7 +237,7 @@ async function onboardUser(accessToken, tierID, externalSignal) {
                     console.log(`[ProjectId] Successfully onboarded, project ID: ${projectId}`);
                     return projectId;
                 }
-                throw new Error("onboardUser done but no project_id in response");
+                throw new Error(`onboardUser done but no project_id in response (${describeResponseShape(data)})`);
             }
 
             // Server not done yet – wait and retry
@@ -268,39 +270,72 @@ async function onboardUser(accessToken, tierID, externalSignal) {
 /**
  * Extract project ID from loadCodeAssist response.
  */
-function extractProjectId(data) {
-    if (!data) return null;
+function normalizeProjectId(value) {
+    if (!value) return null;
 
-    if (typeof data.cloudaicompanionProject === "string") {
-        const id = data.cloudaicompanionProject.trim();
-        if (id) return id;
+    if (typeof value === "string") {
+        const id = value.trim();
+        if (!id) return null;
+        const match = id.match(/(?:projects\/)?([a-z][a-z0-9-]{4,}[a-z0-9])$/i);
+        return match ? match[1] : id;
     }
 
-    if (data.cloudaicompanionProject && typeof data.cloudaicompanionProject === "object") {
-        const id = data.cloudaicompanionProject.id;
-        if (typeof id === "string" && id.trim()) return id.trim();
+    if (typeof value === "object") {
+        return normalizeProjectId(
+            value.id ||
+            value.projectId ||
+            value.project_id ||
+            value.projectNumber ||
+            value.name
+        );
     }
 
     return null;
+}
+
+function findProjectIdDeep(value, depth = 0) {
+    if (!value || depth > 5) return null;
+    const direct = normalizeProjectId(value);
+    if (direct && typeof value !== "object") return direct;
+    if (typeof value !== "object") return null;
+
+    const preferredKeys = [
+        "cloudaicompanionProject",
+        "cloudAiCompanionProject",
+        "project",
+        "projectId",
+        "project_id",
+    ];
+
+    for (const key of preferredKeys) {
+        const id = normalizeProjectId(value[key]);
+        if (id) return id;
+    }
+
+    for (const child of Object.values(value)) {
+        const id = findProjectIdDeep(child, depth + 1);
+        if (id) return id;
+    }
+
+    return null;
+}
+
+function describeResponseShape(data) {
+    if (!data || typeof data !== "object") return typeof data;
+    const keys = Object.keys(data).slice(0, 12).join(",") || "no-keys";
+    const responseKeys = data.response && typeof data.response === "object"
+        ? Object.keys(data.response).slice(0, 12).join(",")
+        : "none";
+    return `keys=[${keys}] responseKeys=[${responseKeys}]`;
+}
+
+function extractProjectId(data) {
+    return findProjectIdDeep(data);
 }
 
 /**
  * Extract project ID from onboardUser response.
  */
 function extractProjectIdFromOnboard(data) {
-    if (!data?.response) return null;
-
-    const project = data.response.cloudaicompanionProject;
-
-    if (typeof project === "string") {
-        const id = project.trim();
-        if (id) return id;
-    }
-
-    if (project && typeof project === "object") {
-        const id = project.id;
-        if (typeof id === "string" && id.trim()) return id.trim();
-    }
-
-    return null;
+    return findProjectIdDeep(data?.response || data);
 }

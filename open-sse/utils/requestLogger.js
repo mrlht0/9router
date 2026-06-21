@@ -69,25 +69,30 @@ function writeJsonFile(sessionPath, filename, data) {
   }
 }
 
-// Mask sensitive data in headers (DISABLED - keep full token for testing)
+const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|cookie|password|secret|session|credential)/i;
+
+function maskSensitiveValue(value) {
+  if (value === null || value === undefined) return value;
+  const text = String(value);
+  if (text.length <= 8) return "[redacted]";
+  return `${text.slice(0, 4)}...[redacted]...${text.slice(-4)}`;
+}
+
+function maskSensitiveData(value, depth = 0) {
+  if (depth > 8 || value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map((item) => maskSensitiveData(item, depth + 1));
+  if (typeof value !== "object") return value;
+
+  const masked = {};
+  for (const [key, item] of Object.entries(value)) {
+    masked[key] = SENSITIVE_KEY_RE.test(key) ? maskSensitiveValue(item) : maskSensitiveData(item, depth + 1);
+  }
+  return masked;
+}
+
 function maskSensitiveHeaders(headers) {
   if (!headers) return {};
-  return { ...headers };
-  
-  // Old masking code (disabled):
-  // const masked = { ...headers };
-  // const sensitiveKeys = ["authorization", "x-api-key", "cookie", "token"];
-  // 
-  // for (const key of Object.keys(masked)) {
-  //   const lowerKey = key.toLowerCase();
-  //   if (sensitiveKeys.some(sk => lowerKey.includes(sk))) {
-  //     const value = masked[key];
-  //     if (value && value.length > 20) {
-  //       masked[key] = value.slice(0, 10) + "..." + value.slice(-5);
-  //     }
-  //   }
-  // }
-  // return masked;
+  return maskSensitiveData(headers);
 }
 
 // No-op logger when logging is disabled
@@ -132,7 +137,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
         timestamp: new Date().toISOString(),
         endpoint,
         headers: maskSensitiveHeaders(headers),
-        body
+        body: maskSensitiveData(body)
       });
     },
     
@@ -141,7 +146,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
       writeJsonFile(sessionPath, "2_req_source.json", {
         timestamp: new Date().toISOString(),
         headers: maskSensitiveHeaders(headers),
-        body
+        body: maskSensitiveData(body)
       });
     },
     
@@ -149,7 +154,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     logOpenAIRequest(body) {
       writeJsonFile(sessionPath, "3_req_openai.json", {
         timestamp: new Date().toISOString(),
-        body
+        body: maskSensitiveData(body)
       });
     },
     
@@ -159,7 +164,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
         timestamp: new Date().toISOString(),
         url,
         headers: maskSensitiveHeaders(headers),
-        body
+        body: maskSensitiveData(body)
       });
     },
     
@@ -170,8 +175,8 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
         timestamp: new Date().toISOString(),
         status,
         statusText,
-        headers: headers ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers) : {},
-        body
+        headers: maskSensitiveHeaders(headers ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers) : {}),
+        body: maskSensitiveData(body)
       });
     },
     
@@ -201,7 +206,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     logConvertedResponse(body) {
       writeJsonFile(sessionPath, "7_res_client.json", {
         timestamp: new Date().toISOString(),
-        body
+        body: maskSensitiveData(body)
       });
     },
     
@@ -222,7 +227,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
         timestamp: new Date().toISOString(),
         error: error?.message || String(error),
         stack: error?.stack,
-        requestBody
+        requestBody: maskSensitiveData(requestBody)
       });
     }
   };

@@ -8,6 +8,7 @@ import { join } from "path";
  * Auto-detect and extract Kiro refresh token from AWS SSO cache
  */
 export async function GET() {
+
   try {
     const cachePath = join(homedir(), ".aws/sso/cache");
 

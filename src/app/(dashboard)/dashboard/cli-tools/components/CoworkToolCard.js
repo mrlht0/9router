@@ -233,7 +233,7 @@ export default function CoworkToolCard({
     const modelsToShow = selectedModels.length > 0 ? selectedModels : ["provider/model-id"];
     const cfg = {
       inferenceProvider: "gateway",
-      inferenceGatewayBaseUrl: getEffectiveBaseUrl() || "https://your-public-host/v1",
+      inferenceGatewayBaseUrl: getEffectiveBaseUrl() || "https://your-9router-host.invalid/v1",
       inferenceGatewayApiKey: keyToUse,
       inferenceModels: modelsToShow.map((name) => ({ name })),
     };
@@ -569,7 +569,7 @@ export default function CoworkToolCard({
                 <label className="text-[11px] text-text-muted font-medium">SSE URL</label>
                 <input
                   type="text"
-                  placeholder="https://your-mcp-server.com/sse"
+                  placeholder="https://your-mcp-server.invalid/sse"
                   value={addMcpForm.url}
                   onChange={(e) => setAddMcpForm((f) => ({ ...f, url: e.target.value }))}
                   className="px-2 py-1.5 rounded border border-border bg-surface text-xs outline-none focus:border-primary"

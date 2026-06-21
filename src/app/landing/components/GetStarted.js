@@ -82,9 +82,9 @@ export default function GetStarted() {
                 </div>
                 
                 <div className="text-gray-400 text-xs">
-                  <span className="text-purple-400">Data Location:</span><br/>
-                  <span className="text-gray-500">  macOS/Linux:</span> ~/.9router/db/data.sqlite<br/>
-                  <span className="text-gray-500">  Windows:</span> %APPDATA%/9router/db/data.sqlite
+                  <span className="text-purple-400">Data Storage:</span><br/>
+                  <span className="text-gray-500">  Primary:</span> PostgreSQL / MongoDB app_documents<br/>
+                  <span className="text-gray-500">  Local:</span> runtime files under DATA_DIR
                 </div>
               </div>
             </div>

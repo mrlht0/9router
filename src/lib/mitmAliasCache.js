@@ -1,5 +1,5 @@
 // JSON cache for mitmAlias — read by standalone MITM server (no SQLite native binding).
-// Source of truth = SQLite kv['mitmAlias']. JSON is a read-replica synced on app start
+// Source of truth = DocumentDB-backed models. JSON is a read-replica synced on app start
 // and after every UI write.
 import fs from "fs";
 import path from "path";
@@ -23,7 +23,7 @@ function writeAtomic(data) {
 // Sync entire mitmAlias map from DB → JSON file
 export async function syncToJson() {
   try {
-    const { getMitmAlias } = await import("@/lib/db/repos/aliasRepo.js");
+    const { getMitmAlias } = await import("@/models");
     const all = await getMitmAlias();
     writeAtomic(all || {});
   } catch (e) {

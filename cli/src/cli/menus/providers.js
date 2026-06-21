@@ -790,7 +790,7 @@ async function handleAddCustomNode() {
   const prefix = await prompt("Prefix (used in model IDs, e.g. myapi): ");
   if (!prefix) { showStatus("Cancelled", "warning"); await pause(); return; }
 
-  const baseUrl = await prompt("Base URL (e.g. https://api.example.com/v1): ");
+  const baseUrl = await prompt("Base URL (e.g. https://api.your-provider.invalid/v1): ");
   if (!baseUrl) { showStatus("Cancelled", "warning"); await pause(); return; }
 
   // Step 3: API type (OpenAI only)

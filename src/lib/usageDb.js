@@ -6,7 +6,6 @@ import { createDocumentDb } from "@/lib/documentDb.js";
 import { getCurrentUserScopeId, getUserScopeFromContext, runWithUserScope } from "@/lib/localDb.js";
 
 const DB_FILE = path.join(DATA_DIR, "usage.json");
-const LOG_FILE = path.join(DATA_DIR, "log.txt");
 
 // Ensure data directory exists
 if (fs && typeof fs.existsSync === "function") {
@@ -24,6 +23,7 @@ const defaultData = {
   history: [],
   totalRequestsLifetime: 0,
   dailySummary: {},
+  requestLogs: [],
   userData: {},
 };
 
@@ -32,6 +32,7 @@ function createScopedUsageData() {
     history: [],
     totalRequestsLifetime: 0,
     dailySummary: {},
+    requestLogs: [],
   };
 }
 
@@ -46,13 +47,17 @@ async function resolveUsageOwnerId() {
 }
 
 function getScopedUsageState(root, ownerId) {
-  if (!ownerId) return root;
+  if (!ownerId) {
+    if (!Array.isArray(root.requestLogs)) root.requestLogs = [];
+    return root;
+  }
   if (!root.userData || typeof root.userData !== "object" || Array.isArray(root.userData)) {
     root.userData = {};
   }
   if (!root.userData[ownerId] || typeof root.userData[ownerId] !== "object" || Array.isArray(root.userData[ownerId])) {
     root.userData[ownerId] = createScopedUsageData();
   }
+  if (!Array.isArray(root.userData[ownerId].requestLogs)) root.userData[ownerId].requestLogs = [];
   return root.userData[ownerId];
 }
 
@@ -149,6 +154,7 @@ if (!global._pendingTimers) global._pendingTimers = {};
 const pendingTimers = global._pendingTimers;
 
 const PENDING_TIMEOUT_MS = 60 * 1000; // 1 minute
+const RETENTION_MONTHS = 5;
 
 // In-memory ring buffer for recent requests (avoids disk I/O on every SSE emit)
 const RING_CAP = 50;
@@ -157,6 +163,38 @@ if (!global._recentRing) global._recentRing = {};
 if (!global._connectionMapCache) global._connectionMapCache = {};
 const recentRing = global._recentRing;
 const connCache = global._connectionMapCache;
+
+function getRetentionCutoffTime() {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - RETENTION_MONTHS);
+  return cutoff.getTime();
+}
+
+function pruneUsageRetention(scope) {
+  let changed = false;
+  const cutoffTime = getRetentionCutoffTime();
+  if (Array.isArray(scope.history)) {
+    const before = scope.history.length;
+    scope.history = scope.history.filter((entry) => new Date(entry.timestamp || 0).getTime() >= cutoffTime);
+    changed = changed || scope.history.length !== before;
+  }
+  if (Array.isArray(scope.requestLogs)) {
+    const before = scope.requestLogs.length;
+    scope.requestLogs = scope.requestLogs.filter((entry) => new Date(entry.isoTimestamp || entry.timestamp || 0).getTime() >= cutoffTime);
+    changed = changed || scope.requestLogs.length !== before;
+  }
+  if (scope.dailySummary && typeof scope.dailySummary === "object") {
+    for (const dateKey of Object.keys(scope.dailySummary)) {
+      const [year, month, day] = dateKey.split("-").map(Number);
+      const dayTime = new Date(year, month - 1, day).getTime();
+      if (!Number.isFinite(dayTime) || dayTime < cutoffTime) {
+        delete scope.dailySummary[dateKey];
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
 
 function getPendingState(ownerId) {
   const key = ownerScopeKey(ownerId);
@@ -333,7 +371,11 @@ export async function getActiveRequests(ownerId = null) {
  * Get usage database instance (singleton)
  */
 export async function getUsageDb() {
-  const pgDb = await createDocumentDb("usageDb", defaultData, DB_FILE);
+  const pgDb = await createDocumentDb("usageDb", defaultData, DB_FILE, {
+    preferredBackends: ["postgres"],
+    syncBackends: false,
+    seedFromFile: false,
+  });
   if (!pgDb.data || typeof pgDb.data !== "object") {
     pgDb.data = { ...defaultData };
     await pgDb.write();
@@ -349,7 +391,15 @@ export async function getUsageDb() {
       pgDb.data.dailySummary = {};
     }
   }
+  if (!Array.isArray(pgDb.data.requestLogs)) pgDb.data.requestLogs = [];
   if (!pgDb.data.userData || typeof pgDb.data.userData !== "object") pgDb.data.userData = {};
+  let pruned = pruneUsageRetention(pgDb.data);
+  for (const scopedState of Object.values(pgDb.data.userData)) {
+    if (scopedState && typeof scopedState === "object" && !Array.isArray(scopedState)) {
+      pruned = pruneUsageRetention(scopedState) || pruned;
+    }
+  }
+  if (pruned) await pgDb.write();
   return pgDb;
 }
 
@@ -383,10 +433,7 @@ export async function saveRequestUsage(entry) {
     if (!scope.dailySummary) scope.dailySummary = {};
     aggregateEntryToDailySummary(scope.dailySummary, entry);
 
-    const MAX_HISTORY = 2000;
-    if (scope.history.length > MAX_HISTORY) {
-      scope.history.splice(0, scope.history.length - MAX_HISTORY);
-    }
+    pruneUsageRetention(scope);
 
     await db.write();
     pushToRing(entry);
@@ -441,79 +488,52 @@ function formatLogDate(date = new Date()) {
 }
 
 /**
- * Append to log.txt
+ * Append request log to PostgreSQL-backed usageDb.
  * Format: datetime(dd-mm-yyyy h:m:s) | model | provider | account | tokens sent | tokens received | status
  */
 export async function appendRequestLog({ model, provider, connectionId, tokens, status }) {
   try {
+    const { db, scope, ownerId } = await getUsageDbContext();
     const timestamp = formatLogDate();
-    const ownerId = await resolveUsageOwnerId();
+    const isoTimestamp = new Date().toISOString();
     const p = provider?.toUpperCase() || "-";
     const m = model || "-";
 
-    // Resolve account name
     let account = connectionId ? connectionId.slice(0, 8) : "-";
     try {
       const { getProviderConnections } = await import("@/lib/localDb.js");
       const connections = await getProviderConnections();
       const conn = connections.find(c => c.id === connectionId);
-      if (conn) {
-        account = conn.name || conn.email || account;
-      }
+      if (conn) account = conn.name || conn.email || account;
     } catch {}
 
     const sent = tokens?.prompt_tokens !== undefined ? tokens.prompt_tokens : "-";
     const received = tokens?.completion_tokens !== undefined ? tokens.completion_tokens : "-";
+    const line = `${ownerId || "global"} | ${timestamp} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${status}`;
 
-    const line = `${ownerId || "global"} | ${timestamp} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${status}\n`;
-
-    fs.appendFileSync(LOG_FILE, line);
-
-    // Trim to keep only last 200 lines
-    const content = fs.readFileSync(LOG_FILE, "utf-8");
-    const lines = content.trim().split("\n");
-    if (lines.length > 200) {
-      fs.writeFileSync(LOG_FILE, lines.slice(-200).join("\n") + "\n");
-    }
+    if (!Array.isArray(scope.requestLogs)) scope.requestLogs = [];
+    scope.requestLogs.push({ ownerId: ownerId || null, isoTimestamp, line });
+    pruneUsageRetention(scope);
+    await db.write();
   } catch (error) {
-    console.error("Failed to append to log.txt:", error.message);
+    console.error("Failed to append request log:", error.message);
   }
 }
 
 /**
- * Get last N lines of log.txt
+ * Get last N request logs from PostgreSQL-backed usageDb.
  */
 export async function getRecentLogs(limit = 200) {
-  // Runtime check: ensure fs module is available
-  if (!fs || typeof fs.existsSync !== "function") {
-    console.error("[usageDb] fs module not available in this environment");
-    return [];
-  }
-  
-  if (!LOG_FILE) {
-    console.error("[usageDb] LOG_FILE path not defined");
-    return [];
-  }
-  
-  if (!fs.existsSync(LOG_FILE)) {
-    console.log(`[usageDb] Log file does not exist: ${LOG_FILE}`);
-    return [];
-  }
-  
   try {
-    const ownerId = await resolveUsageOwnerId();
-    const content = fs.readFileSync(LOG_FILE, "utf-8");
-    const lines = content.trim().split("\n");
-    return lines
-      .filter((line) => {
-        const [lineOwner] = line.split(" | ");
-        return (ownerId || "global") === lineOwner;
-      })
+    const { scope, ownerId } = await getUsageDbContext();
+    const logs = Array.isArray(scope.requestLogs) ? scope.requestLogs : [];
+    return logs
+      .filter((entry) => (entry.ownerId || null) === (ownerId || null))
       .slice(-limit)
-      .reverse();
+      .reverse()
+      .map((entry) => entry.line);
   } catch (error) {
-    console.error("[usageDb] Failed to read log.txt:", error.message);
-    console.error("[usageDb] LOG_FILE path:", LOG_FILE);
+    console.error("[usageDb] Failed to read request logs:", error.message);
     return [];
   }
 }
@@ -953,5 +973,7 @@ export async function getChartData(period = "7d") {
   return buckets;
 }
 
-// Re-export request details functions from new SQLite-based module
+// Re-export request details functions
 export { saveRequestDetail, getRequestDetails, getRequestDetailById } from "./requestDetailsDb.js";
+
+

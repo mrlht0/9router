@@ -7,6 +7,7 @@ import { createDocumentDb } from "@/lib/documentDb.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DB_FILE = path.join(DATA_DIR, "db.json");
+const AUTH_DB_FILE = path.join(DATA_DIR, "auth.json");
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -64,9 +65,10 @@ function cloneDefaultData() {
   };
 }
 
-if (!fs.existsSync(DB_FILE)) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(cloneDefaultData(), null, 2));
+function cloneAuthData() {
+  return { users: [] };
 }
+
 
 function ensureDbShape(data) {
   const defaults = cloneDefaultData();
@@ -220,8 +222,37 @@ async function safeWrite(db) {
   await db.write();
 }
 
+async function getAuthDb() {
+  const authDb = await createDocumentDb("authDb", cloneAuthData(), AUTH_DB_FILE, {
+    preferredBackends: ["mongo", "postgres"],
+    syncBackends: true,
+    seedFromFile: false,
+  });
+  if (!authDb.data || typeof authDb.data !== "object") authDb.data = cloneAuthData();
+  if (!Array.isArray(authDb.data.users)) authDb.data.users = [];
+
+  if (authDb.data.users.length === 0) {
+    try {
+      const configDb = await getDb();
+      const legacyUsers = Array.isArray(configDb.data?.users) ? configDb.data.users : [];
+      if (legacyUsers.length > 0) {
+        authDb.data.users = legacyUsers;
+        await safeWrite(authDb);
+        console.log(`[AuthDB] migrated ${legacyUsers.length} user(s) from localDb.users to authDb.users`);
+      }
+    } catch (error) {
+      console.warn("[AuthDB] legacy user migration skipped:", error.message);
+    }
+  }
+
+  return authDb;
+}
 export async function getDb() {
-  const pgDb = await createDocumentDb("localDb", cloneDefaultData(), DB_FILE);
+  const pgDb = await createDocumentDb("localDb", cloneDefaultData(), DB_FILE, {
+    preferredBackends: ["postgres", "mongo"],
+    syncBackends: true,
+    seedFromFile: false,
+  });
   const { data, changed } = ensureDbShape(pgDb.data);
   pgDb.data = data;
   if (changed) await pgDb.write();
@@ -329,6 +360,7 @@ export async function createProxyPool(data) {
     type: data.type || "http",
     isActive: data.isActive !== undefined ? data.isActive : true,
     strictProxy: data.strictProxy === true,
+    relaySecret: data.relaySecret || "",
     testStatus: data.testStatus || "unknown",
     lastTestedAt: data.lastTestedAt || null,
     lastError: data.lastError || null,
@@ -758,7 +790,7 @@ function normalizeUserEmail(email) {
 }
 
 export async function getUsers() {
-  const db = await getDb();
+  const db = await getAuthDb();
   return Array.isArray(db.data.users) ? db.data.users : [];
 }
 
@@ -776,7 +808,7 @@ export async function getUserByEmail(email) {
 
 export async function createUser(data = {}) {
   return await withUserMutationLock(async () => {
-    const db = await getDb();
+    const db = await getAuthDb();
     if (!Array.isArray(db.data.users)) db.data.users = [];
 
     const email = normalizeUserEmail(data.email);
@@ -802,14 +834,21 @@ export async function createUser(data = {}) {
     };
 
     db.data.users.push(user);
-    getScopedStateSync(db.data, user.id);
     await safeWrite(db);
+
+    try {
+      const configDb = await getDb();
+      getScopedStateSync(configDb.data, user.id);
+      await safeWrite(configDb);
+    } catch (error) {
+      console.warn("[localDb] Failed to initialize user config scope:", error.message);
+    }
     return user;
   });
 }
 
 export async function updateUser(id, updates = {}) {
-  const db = await getDb();
+  const db = await getAuthDb();
   if (!Array.isArray(db.data.users)) db.data.users = [];
 
   const index = db.data.users.findIndex((user) => user.id === id);
@@ -969,3 +1008,4 @@ export async function resetAllPricing() {
   await safeWrite(db);
   return scope.pricing;
 }
+

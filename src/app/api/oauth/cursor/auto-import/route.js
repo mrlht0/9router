@@ -175,6 +175,7 @@ async function extractTokensViaCLI(dbPath) {
  * Strategy: better-sqlite3 → sqlite3 CLI → manual fallback
  */
 export async function GET() {
+
   try {
     const platform = process.platform;
     const candidates = getCandidatePaths(platform);

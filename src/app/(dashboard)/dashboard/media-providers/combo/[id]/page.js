@@ -33,7 +33,7 @@ const EXAMPLE_PATHS = {
 
 const EXAMPLE_BODIES = {
   webSearch: (n) => ({ model: n, query: "What is the latest news about AI?", search_type: "web", max_results: 5 }),
-  webFetch: (n) => ({ model: n, url: "https://example.com", format: "markdown" }),
+  webFetch: (n) => ({ model: n, url: "https://example.invalid", format: "markdown" }),
   image: (n) => ({ model: n, prompt: "A cute cat playing piano", n: 1, size: "1024x1024" }),
   tts: (n) => ({ model: n, input: "Hello, this is a test.", voice: "alloy" }),
 };

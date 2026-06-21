@@ -330,7 +330,7 @@ export function GenericExampleCard({ providerId, kind }) {
                 <input
                   value={refImage}
                   onChange={(e) => setRefImage(e.target.value)}
-                  placeholder={imageEditDefaults.image || "https://example.com/source.png"}
+                  placeholder={imageEditDefaults.image || "https://image-source.invalid/source.png"}
                   className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
                 />
                 {refImage && (
@@ -363,7 +363,7 @@ export function GenericExampleCard({ providerId, kind }) {
                 <input
                   value={maskImage}
                   onChange={(e) => setMaskImage(e.target.value)}
-                  placeholder={imageEditDefaults.mask_image || "https://example.com/mask.png"}
+                  placeholder={imageEditDefaults.mask_image || "https://image-source.invalid/mask.png"}
                   className="w-full px-3 py-1.5 pr-7 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
                 />
                 {maskImage && (

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createProxyPool } from "@/models";
+import { randomBytes } from "node:crypto";
 
 const VERCEL_API = "https://api.vercel.com";
 
@@ -8,7 +9,16 @@ const VERCEL_API = "https://api.vercel.com";
 const RELAY_FUNCTION_CODE = `
 export const config = { runtime: "edge" };
 
+const RELAY_SECRET = "__RELAY_SECRET__";
+
 export default async function handler(req) {
+  if (req.headers.get("x-relay-secret") !== RELAY_SECRET) {
+    return new Response(JSON.stringify({ error: "Invalid relay secret" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   const target = req.headers.get("x-relay-target");
   const relayPath = req.headers.get("x-relay-path") || "/";
   if (!target) {
@@ -23,6 +33,7 @@ export default async function handler(req) {
   const headers = new Headers(req.headers);
   headers.delete("x-relay-target");
   headers.delete("x-relay-path");
+  headers.delete("x-relay-secret");
   headers.delete("host");
 
   const response = await fetch(targetUrl, {
@@ -61,6 +72,7 @@ export async function POST(request) {
     const body = await request.json();
     const vercelToken = body.vercelToken;
     const projectName = body.projectName?.trim() || `relay-${Date.now().toString(36)}`;
+    const relaySecret = randomBytes(32).toString("hex");
 
     if (!vercelToken) {
       return NextResponse.json({ error: "Vercel API token is required" }, { status: 400 });
@@ -78,7 +90,7 @@ export async function POST(request) {
         files: [
           {
             file: "api/relay.js",
-            data: RELAY_FUNCTION_CODE,
+            data: RELAY_FUNCTION_CODE.replace("__RELAY_SECRET__", relaySecret),
           },
           {
             file: "package.json",
@@ -132,6 +144,7 @@ export async function POST(request) {
       noProxy: "",
       isActive: true,
       strictProxy: false,
+      relaySecret,
     });
 
     return NextResponse.json({ proxyPool, deployUrl }, { status: 201 });

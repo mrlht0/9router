@@ -3,6 +3,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { cleanupProviderConnections, getSettings, updateSettings, getApiKeys } from "@/lib/localDb";
+import { warmDocumentDbBackends } from "@/lib/documentDb";
 import {
   enableTunnel, enableTailscale,
   isTunnelManuallyDisabled, isTunnelReconnecting, isTailscaleReconnecting,
@@ -47,6 +48,7 @@ const g = global.__appSingleton ??= {
 
 export async function initializeApp() {
   try {
+    await warmDocumentDbBackends();
     await cleanupProviderConnections();
     const settings = await getSettings();
 
@@ -280,3 +282,4 @@ function startNetworkMonitor() {
 }
 
 export default initializeApp;
+

@@ -137,6 +137,19 @@ export async function handleChat(request, clientRawRequest = null) {
 /**
  * Handle single model chat request
  */
+function isQuotaLikeError(text) {
+  const lower = String(text || "").toLowerCase();
+  return lower.includes("quota") ||
+    lower.includes("rate limit") ||
+    lower.includes("too many requests") ||
+    lower.includes("reset after") ||
+    lower.includes("resource exhausted");
+}
+
+function isMissingProjectIdError(text) {
+  return String(text || "").toLowerCase().includes("missing projectid");
+}
+
 async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
   const modelInfo = await getModelInfo(modelStr);
 
@@ -227,6 +240,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         refreshedCredentials.projectId = pid;
         // Persist to DB in background so subsequent requests have it immediately
         updateProviderCredentials(credentials.connectionId, { projectId: pid }).catch(() => { });
+      } else if (provider === "antigravity") {
+        log.warn("AUTH", `Antigravity connection ${credentials.connectionName} missing projectId, trying next account`);
+        excludeConnectionIds.add(credentials.connectionId);
+        lastError = "Missing projectId for Antigravity connection";
+        lastStatus = HTTP_STATUS.SERVICE_UNAVAILABLE;
+        continue;
       }
     }
 
@@ -262,6 +281,21 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     });
 
     if (result.success) return result.response;
+
+    const shouldSkipWithoutLock =
+      provider === "antigravity" &&
+      (
+        isMissingProjectIdError(result.error) ||
+        (result.status === HTTP_STATUS.FORBIDDEN && !isQuotaLikeError(result.error))
+      );
+
+    if (shouldSkipWithoutLock) {
+      log.warn("AUTH", `Antigravity 403 not quota-like on ${credentials.connectionName}, trying next account`);
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = result.error;
+      lastStatus = result.status;
+      continue;
+    }
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);

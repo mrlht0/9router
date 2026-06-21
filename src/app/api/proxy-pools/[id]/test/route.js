@@ -3,7 +3,10 @@ import { getProxyPoolById, updateProxyPool } from "@/models";
 import { testProxyUrl } from "@/lib/network/proxyTest";
 import { fetch as undiciFetch } from "undici";
 
-async function testVercelRelay(relayUrl, timeoutMs = 10000) {
+const RELAY_TEST_TARGET = process.env.PROXY_RELAY_TEST_TARGET || "https://httpbin.org";
+const RELAY_TEST_PATH = process.env.PROXY_RELAY_TEST_PATH || "/get";
+
+async function testVercelRelay(relayUrl, relaySecret = "", timeoutMs = 10000) {
   const controller = new AbortController();
   const startedAt = Date.now();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -11,8 +14,9 @@ async function testVercelRelay(relayUrl, timeoutMs = 10000) {
     const res = await undiciFetch(relayUrl, {
       method: "GET",
       headers: {
-        "x-relay-target": "https://httpbin.org",
-        "x-relay-path": "/get",
+        "x-relay-target": RELAY_TEST_TARGET,
+        "x-relay-path": RELAY_TEST_PATH,
+        ...(relaySecret ? { "x-relay-secret": relaySecret } : {}),
       },
       signal: controller.signal,
     });
@@ -44,7 +48,7 @@ export async function POST(request, { params }) {
     }
 
     const result = proxyPool.type === "vercel" || proxyPool.type === "cloudflare" || proxyPool.type === "deno"
-      ? await testVercelRelay(proxyPool.proxyUrl)
+      ? await testVercelRelay(proxyPool.proxyUrl, proxyPool.relaySecret || "")
       : await testProxyUrl({ proxyUrl: proxyPool.proxyUrl });
     const now = new Date().toISOString();
 

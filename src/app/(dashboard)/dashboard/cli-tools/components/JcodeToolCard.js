@@ -248,7 +248,7 @@ id = "${selectedModel || "cc/claude-opus-4-7"}"`;
                     <p className="font-medium text-yellow-600 dark:text-yellow-400">jcode CLI not detected locally</p>
                     <p className="text-sm text-text-muted mt-1">Install jcode to enable automatic configuration:</p>
                     <code className="block mt-2 p-2 bg-black/20 rounded text-xs font-mono">
-                      curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash
+                      Install from https://github.com/1jehuang/jcode
                     </code>
                     <p className="text-sm text-text-muted mt-2">Manual configuration is still available if 9router is deployed on a remote server.</p>
                   </div>

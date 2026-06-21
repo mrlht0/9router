@@ -55,6 +55,10 @@ export function hasValuableContent(chunk, format) {
     if (isContentBlockDelta && !hasText && !hasThinking && !hasInputJson) {
       return false;
     }
+    // THÊM ĐOẠN LOG NÀY VÀO ĐÂY
+    if (isContentBlockDelta && (!chunk.index && chunk.index !== 0)) {
+        console.warn("STREAM_DEBUG", "Received content_block_delta without an explicit index:", chunk);
+    }
     return true;
   }
 

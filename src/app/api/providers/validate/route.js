@@ -34,7 +34,7 @@ async function probeWebProvider(provider, apiKey) {
 
   // Minimal body for POST endpoints; GET sends nothing
   if (cfg.method === "POST") {
-    body = JSON.stringify({ query: "ping", q: "ping", url: "https://example.com" });
+    body = JSON.stringify({ query: "ping", q: "ping", url: "https://example.invalid" });
   }
 
   const res = await fetch(url, { method: cfg.method, headers, body, signal: AbortSignal.timeout(8000) });

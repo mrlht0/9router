@@ -165,7 +165,7 @@ export default function BaseUrlSelect({
           type="text"
           value={customInput}
           onChange={handleCustomInput}
-          placeholder={withV1 ? "https://example.com/v1" : "https://example.com"}
+          placeholder={withV1 ? "https://your-provider.invalid/v1" : "https://your-provider.invalid"}
           className="w-full min-w-0 px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
         />
       )}

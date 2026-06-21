@@ -1,9 +1,49 @@
 import fs from "node:fs";
+import { MongoClient } from "mongodb";
 import { Pool } from "pg";
 
-let pool = null;
-const tableReady = new Map();
+if (!global._documentDbState) {
+  global._documentDbState = {
+    pgPool: null,
+    mongoClient: null,
+    mongoConnectPromise: null,
+    pgTableReady: new Map(),
+    mongoIndexReady: new Map(),
+    warnedBackends: new Set(),
+    backendStatus: {
+      postgres: { enabled: false, connected: false, lastError: null, lastOkAt: 0 },
+      mongo: { enabled: false, connected: false, lastError: null, lastOkAt: 0 },
+    },
+    warmupPromise: null,
+    documentCache: new Map(),
+    loggedNamespaces: new Set(),
+    lastWarmupLog: "",
+    lastConfiguredLog: "",
+  };
+}
 
+const state = global._documentDbState;
+const DEFAULT_BACKEND_TIMEOUT_MS = Number(process.env.DOCUMENT_DB_TIMEOUT_MS || 3000);
+
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function isDefaultDocumentData(data, defaultData) {
+  return stableStringify(data) === stableStringify(defaultData);
+}
+
+async function loadFromBackend(backend, namespace, defaultData, seedFilePath, seedFromFile) {
+  if (backend === "postgres") {
+    return await withTimeout(loadFromPostgres(namespace, defaultData, seedFilePath, seedFromFile), "PostgreSQL load");
+  }
+  if (backend === "mongo") {
+    return await withTimeout(loadFromMongo(namespace, defaultData, seedFilePath, seedFromFile), "MongoDB load");
+  }
+  throw new Error(`Unsupported document database backend: ${backend}`);
+}
 function cloneDefaultData(defaultData) {
   if (typeof structuredClone === "function") {
     return structuredClone(defaultData);
@@ -15,8 +55,16 @@ function getDatabaseUrl() {
   return process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
 }
 
+function getMongoUrl() {
+  return process.env.MONGODB_URL || process.env.MONGODB_URI || "";
+}
+
 export function isPostgresEnabled() {
   return /^postgres(ql)?:\/\//i.test(getDatabaseUrl());
+}
+
+export function isMongoEnabled() {
+  return /^mongodb(\+srv)?:\/\//i.test(getMongoUrl());
 }
 
 export function requirePostgres() {
@@ -27,22 +75,130 @@ export function requirePostgres() {
   return value;
 }
 
-function getPool() {
-  if (!pool) {
+export function requireMongo() {
+  const value = getMongoUrl();
+  if (!/^mongodb(\+srv)?:\/\//i.test(value)) {
+    throw new Error("MongoDB is required. Set MONGODB_URL=mongodb://user:password@host:27017/dbname or MONGODB_URI");
+  }
+  return value;
+}
+
+function withTimeout(promise, label, timeoutMs = DEFAULT_BACKEND_TIMEOUT_MS) {
+  if (!timeoutMs || timeoutMs <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function markBackendOk(name) {
+  state.backendStatus[name] = {
+    ...state.backendStatus[name],
+    enabled: true,
+    connected: true,
+    lastError: null,
+    lastOkAt: Date.now(),
+  };
+}
+
+function markBackendError(name, error) {
+  state.backendStatus[name] = {
+    ...state.backendStatus[name],
+    enabled: true,
+    connected: false,
+    lastError: error?.message || String(error),
+  };
+}
+
+function warnBackendOnce(key, error) {
+  if (state.warnedBackends.has(key)) return;
+  state.warnedBackends.add(key);
+  console.warn(`[DocumentDB] ${key}: ${error.message}`);
+}
+
+function formatBackendStatus(name) {
+  const status = state.backendStatus[name];
+  if (!status?.enabled) return `${name}=disabled`;
+  if (status.connected) return `${name}=connected`;
+  return `${name}=unavailable${status.lastError ? ` (${status.lastError})` : ""}`;
+}
+
+function logWarmupStatus() {
+  const message = [
+    `[DocumentDB] startup timeout=${DEFAULT_BACKEND_TIMEOUT_MS}ms`,
+    formatBackendStatus("postgres"),
+    formatBackendStatus("mongo"),
+  ].join(" | ");
+  if (state.lastWarmupLog === message) return;
+  state.lastWarmupLog = message;
+  console.log(message);
+}
+
+function logNamespaceSelection(namespace, backend, preferredBackends, syncBackends) {
+  const key = `${namespace}:${preferredBackends.join(">")}:${syncBackends}:${backend}`;
+  if (state.loggedNamespaces.has(key)) return;
+  state.loggedNamespaces.add(key);
+  console.log(`[DocumentDB] namespace=${namespace} active=${backend} preferred=${preferredBackends.join(">")} sync=${syncBackends}`);
+}
+
+function getPgPool() {
+  if (!state.pgPool) {
     const connectionString = requirePostgres();
-    pool = new Pool({
+    state.pgPool = new Pool({
       connectionString,
+      connectionTimeoutMillis: DEFAULT_BACKEND_TIMEOUT_MS,
+      query_timeout: DEFAULT_BACKEND_TIMEOUT_MS,
       ssl: connectionString.includes("supabase.com")
         ? { rejectUnauthorized: false }
         : undefined,
     });
+    state.pgPool.on("error", (error) => {
+      markBackendError("postgres", error);
+      warnBackendOnce("PostgreSQL pool error", error);
+    });
   }
-  return pool;
+  return state.pgPool;
 }
 
-async function ensureTable(namespace) {
-  if (tableReady.has(namespace)) return;
-  const currentPool = getPool();
+function getMongoDbName() {
+  const mongoUrl = requireMongo();
+  try {
+    const parsed = new URL(mongoUrl);
+    const pathname = parsed.pathname.replace(/^\/+/, "").trim();
+    if (pathname) return decodeURIComponent(pathname);
+  } catch {
+    // Ignore parse failures and use env/default below.
+  }
+  return String(process.env.MONGODB_DB || "9router").trim() || "9router";
+}
+
+async function getMongoClient() {
+  if (state.mongoClient) return state.mongoClient;
+  if (!state.mongoConnectPromise) {
+    state.mongoClient = new MongoClient(requireMongo(), {
+      serverSelectionTimeoutMS: DEFAULT_BACKEND_TIMEOUT_MS,
+      connectTimeoutMS: DEFAULT_BACKEND_TIMEOUT_MS,
+    });
+    state.mongoConnectPromise = state.mongoClient.connect()
+      .then((client) => {
+        state.mongoClient = client;
+        return client;
+      })
+      .catch((error) => {
+        state.mongoClient = null;
+        throw error;
+      })
+      .finally(() => {
+        state.mongoConnectPromise = null;
+      });
+  }
+  return state.mongoConnectPromise;
+}
+
+async function ensurePgTable(namespace) {
+  if (state.pgTableReady.has(namespace)) return;
+  const currentPool = getPgPool();
   await currentPool.query(`
     CREATE TABLE IF NOT EXISTS app_documents (
       namespace TEXT PRIMARY KEY,
@@ -50,11 +206,18 @@ async function ensureTable(namespace) {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
-  tableReady.set(namespace, true);
+  state.pgTableReady.set(namespace, true);
 }
 
-async function readSeedFile(seedFilePath, defaultData) {
-  if (!seedFilePath || !fs.existsSync(seedFilePath)) {
+async function ensureMongoIndex(collectionName) {
+  if (state.mongoIndexReady.has(collectionName)) return;
+  const client = await getMongoClient();
+  await client.db(getMongoDbName()).collection(collectionName).createIndex({ namespace: 1 }, { unique: true });
+  state.mongoIndexReady.set(collectionName, true);
+}
+
+async function readSeedFile(seedFilePath, defaultData, seedFromFile) {
+  if (!seedFromFile || !seedFilePath || !fs.existsSync(seedFilePath)) {
     return cloneDefaultData(defaultData);
   }
 
@@ -67,45 +230,290 @@ async function readSeedFile(seedFilePath, defaultData) {
   }
 }
 
-export async function createDocumentDb(namespace, defaultData, seedFilePath = "") {
+async function probePostgres() {
+  if (!isPostgresEnabled()) return false;
+  state.backendStatus.postgres.enabled = true;
+  try {
+    const pool = getPgPool();
+    await withTimeout(pool.query("SELECT 1"), "PostgreSQL probe");
+    markBackendOk("postgres");
+    return true;
+  } catch (error) {
+    markBackendError("postgres", error);
+    warnBackendOnce("PostgreSQL unavailable", error);
+    return false;
+  }
+}
+
+async function probeMongo() {
+  if (!isMongoEnabled()) return false;
+  state.backendStatus.mongo.enabled = true;
+  try {
+    const client = await withTimeout(getMongoClient(), "MongoDB connect");
+    await withTimeout(client.db(getMongoDbName()).command({ ping: 1 }), "MongoDB probe");
+    markBackendOk("mongo");
+    return true;
+  } catch (error) {
+    markBackendError("mongo", error);
+    warnBackendOnce("MongoDB unavailable", error);
+    return false;
+  }
+}
+
+async function warmBackends() {
+  if (!state.warmupPromise) {
+    const configuredMessage = `[DocumentDB] startup configured postgres=${isPostgresEnabled() ? "enabled" : "disabled"} mongo=${isMongoEnabled() ? "enabled" : "disabled"} timeout=${DEFAULT_BACKEND_TIMEOUT_MS}ms`;
+    if (state.lastConfiguredLog !== configuredMessage) {
+      state.lastConfiguredLog = configuredMessage;
+      console.log(configuredMessage);
+    }
+    state.warmupPromise = (async () => {
+      await Promise.allSettled([probePostgres(), probeMongo()]);
+      logWarmupStatus();
+    })().finally(() => {
+      state.warmupPromise = null;
+    });
+  }
+  return state.warmupPromise;
+}
+
+export async function warmDocumentDbBackends() {
+  await warmBackends();
+  return {
+    postgres: { ...state.backendStatus.postgres },
+    mongo: { ...state.backendStatus.mongo },
+  };
+}
+
+function normalizeBackendList(preferredBackends) {
+  const configured = [];
+  if (isPostgresEnabled()) configured.push("postgres");
+  if (isMongoEnabled()) configured.push("mongo");
+
+  const requested = Array.isArray(preferredBackends) && preferredBackends.length > 0
+    ? preferredBackends
+    : ["postgres", "mongo"];
+
+  const ordered = [];
+  for (const backend of requested) {
+    if (configured.includes(backend) && !ordered.includes(backend)) ordered.push(backend);
+  }
+  for (const backend of configured) {
+    if (!ordered.includes(backend)) ordered.push(backend);
+  }
+  return ordered;
+}
+
+function getPreferredBackendOrder(preferredBackends) {
+  const order = normalizeBackendList(preferredBackends);
+
+  order.sort((a, b) => {
+    const aConnected = state.backendStatus[a]?.connected ? 1 : 0;
+    const bConnected = state.backendStatus[b]?.connected ? 1 : 0;
+    if (aConnected !== bConnected) return bConnected - aConnected;
+    return normalizeBackendList(preferredBackends).indexOf(a) - normalizeBackendList(preferredBackends).indexOf(b);
+  });
+
+  return order;
+}
+
+async function loadFromPostgres(namespace, defaultData, seedFilePath = "", seedFromFile = false) {
   const defaults = cloneDefaultData(defaultData);
-  requirePostgres();
+  await ensurePgTable(namespace);
 
-  await ensureTable(namespace);
-
-  const currentPool = getPool();
+  const currentPool = getPgPool();
   const existing = await currentPool.query(
     "SELECT data FROM app_documents WHERE namespace = $1",
     [namespace]
   );
 
   if (existing.rowCount === 0) {
-    const seedData = await readSeedFile(seedFilePath, defaults);
+    const seedData = await readSeedFile(seedFilePath, defaults, seedFromFile);
     await currentPool.query(
       `INSERT INTO app_documents (namespace, data, updated_at)
        VALUES ($1, $2::jsonb, NOW())
        ON CONFLICT (namespace) DO NOTHING`,
       [namespace, JSON.stringify(seedData)]
     );
-    return {
-      data: seedData,
-      async write() {
-        await currentPool.query(
-          "UPDATE app_documents SET data = $2::jsonb, updated_at = NOW() WHERE namespace = $1",
-          [namespace, JSON.stringify(this.data)]
-        );
-      },
-    };
+    markBackendOk("postgres");
+    return seedData;
   }
 
-  const data = existing.rows[0]?.data ?? defaults;
-  return {
+  markBackendOk("postgres");
+  return existing.rows[0]?.data ?? defaults;
+}
+
+async function writeToPostgres(namespace, data) {
+  await ensurePgTable(namespace);
+  const currentPool = getPgPool();
+  await currentPool.query(
+    `INSERT INTO app_documents (namespace, data, updated_at)
+     VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (namespace) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [namespace, JSON.stringify(data)]
+  );
+  markBackendOk("postgres");
+}
+
+async function loadFromMongo(namespace, defaultData, seedFilePath = "", seedFromFile = false) {
+  const defaults = cloneDefaultData(defaultData);
+  const collectionName = "app_documents";
+  await ensureMongoIndex(collectionName);
+
+  const client = await getMongoClient();
+  const collection = client.db(getMongoDbName()).collection(collectionName);
+  const existing = await collection.findOne({ namespace });
+
+  if (!existing) {
+    const seedData = await readSeedFile(seedFilePath, defaults, seedFromFile);
+    await collection.updateOne(
+      { namespace },
+      {
+        $setOnInsert: {
+          namespace,
+          data: seedData,
+          updated_at: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+    markBackendOk("mongo");
+    return seedData;
+  }
+
+  markBackendOk("mongo");
+  return existing.data ?? defaults;
+}
+
+async function writeToMongo(namespace, data) {
+  const collectionName = "app_documents";
+  await ensureMongoIndex(collectionName);
+
+  const client = await getMongoClient();
+  const collection = client.db(getMongoDbName()).collection(collectionName);
+  await collection.updateOne(
+    { namespace },
+    {
+      $set: {
+        data,
+        updated_at: new Date(),
+      },
+    },
+    { upsert: true }
+  );
+  markBackendOk("mongo");
+}
+
+async function syncSecondaryBackends(primaryBackend, namespace, data, preferredBackends) {
+  const syncTargets = normalizeBackendList(preferredBackends).filter((backend) => backend !== primaryBackend);
+  await Promise.allSettled(syncTargets.map(async (backend) => {
+    try {
+      if (backend === "postgres") {
+        await withTimeout(writeToPostgres(namespace, data), `${backend} secondary sync`);
+      } else if (backend === "mongo") {
+        await withTimeout(writeToMongo(namespace, data), `${backend} secondary sync`);
+      }
+    } catch (error) {
+      markBackendError(backend, error);
+      warnBackendOnce(`Secondary sync failed for ${backend}`, error);
+    }
+  }));
+}
+
+export async function createDocumentDb(namespace, defaultData, seedFilePath = "", options = {}) {
+  const {
+    preferredBackends = ["postgres", "mongo"],
+    syncBackends = true,
+    seedFromFile = false,
+  } = options;
+
+  await warmBackends();
+
+  const cacheKey = `${namespace}::${seedFilePath}::${preferredBackends.join(",")}::${syncBackends ? "sync" : "single"}`;
+  if (state.documentCache.has(cacheKey)) {
+    return state.documentCache.get(cacheKey);
+  }
+
+  const errors = [];
+  let activeBackend = null;
+  let data = null;
+
+  const orderedBackends = getPreferredBackendOrder(preferredBackends);
+
+  for (const backend of orderedBackends) {
+    try {
+      data = await loadFromBackend(backend, namespace, defaultData, seedFilePath, seedFromFile);
+      activeBackend = backend;
+      break;
+    } catch (error) {
+      markBackendError(backend, error);
+      errors.push(`${backend}: ${error.message}`);
+      warnBackendOnce(`${backend} load failed`, error);
+    }
+  }
+
+  if (activeBackend && syncBackends && isDefaultDocumentData(data, defaultData)) {
+    for (const backend of orderedBackends.filter((candidate) => candidate !== activeBackend)) {
+      try {
+        const candidateData = await loadFromBackend(backend, namespace, defaultData, seedFilePath, seedFromFile);
+        if (!isDefaultDocumentData(candidateData, defaultData)) {
+          console.log(`[DocumentDB] namespace=${namespace} recovered non-empty data from ${backend}; syncing ${activeBackend}`);
+          data = candidateData;
+          activeBackend = backend;
+          await syncSecondaryBackends(backend, namespace, data, preferredBackends);
+          break;
+        }
+      } catch (error) {
+        markBackendError(backend, error);
+        warnBackendOnce(`${backend} recovery load failed`, error);
+      }
+    }
+  }
+
+  if (!activeBackend) {
+    if (errors.length > 0) {
+      throw new Error(`No document database backend available. ${errors.join(" | ")}`);
+    }
+    throw new Error("No document database configured. Set DATABASE_URL for PostgreSQL or MONGODB_URL for MongoDB.");
+  }
+
+  logNamespaceSelection(namespace, activeBackend, preferredBackends, syncBackends);
+
+  const documentHandle = {
     data,
+    backend: activeBackend,
     async write() {
-      await currentPool.query(
-        "UPDATE app_documents SET data = $2::jsonb, updated_at = NOW() WHERE namespace = $1",
-        [namespace, JSON.stringify(this.data)]
-      );
+      const payload = this.data;
+      const orderedBackends = [this.backend, ...getPreferredBackendOrder(preferredBackends).filter((backend) => backend !== this.backend)];
+      const writeErrors = [];
+
+      for (const backend of orderedBackends) {
+        try {
+          if (backend === "postgres") {
+            await withTimeout(writeToPostgres(namespace, payload), "PostgreSQL write");
+          } else if (backend === "mongo") {
+            await withTimeout(writeToMongo(namespace, payload), "MongoDB write");
+          }
+
+          if (this.backend !== backend) {
+            console.log(`[DocumentDB] namespace=${namespace} failover active=${backend}`);
+          }
+          this.backend = backend;
+          if (syncBackends) await syncSecondaryBackends(backend, namespace, payload, preferredBackends);
+          return;
+        } catch (error) {
+          markBackendError(backend, error);
+          writeErrors.push(`${backend}: ${error.message}`);
+          warnBackendOnce(`${backend} write failed`, error);
+        }
+      }
+
+      throw new Error(`Failed to persist document. ${writeErrors.join(" | ")}`);
     },
   };
+
+  state.documentCache.set(cacheKey, documentHandle);
+  return documentHandle;
 }
+
+

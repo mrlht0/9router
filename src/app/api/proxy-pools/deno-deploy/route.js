@@ -1,9 +1,19 @@
 import { NextResponse } from "next/server";
 import { createProxyPool } from "@/models";
+import { randomBytes } from "node:crypto";
 
 const DENO_V2_API = "https://api.deno.com/v2";
 
-const DENO_RELAY_CODE = `Deno.serve(async (request) => {
+const DENO_RELAY_CODE = `const RELAY_SECRET = "__RELAY_SECRET__";
+
+Deno.serve(async (request) => {
+  if (request.headers.get("x-relay-secret") !== RELAY_SECRET) {
+    return new Response(JSON.stringify({ error: "Invalid relay secret" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   const target = request.headers.get("x-relay-target");
   const relayPath = request.headers.get("x-relay-path") || "/";
 
@@ -18,6 +28,7 @@ const DENO_RELAY_CODE = `Deno.serve(async (request) => {
   const newHeaders = new Headers(request.headers);
   newHeaders.delete("x-relay-target");
   newHeaders.delete("x-relay-path");
+  newHeaders.delete("x-relay-secret");
   newHeaders.delete("host");
 
   const init = {
@@ -50,6 +61,7 @@ export async function POST(request) {
     const denoToken = body.denoToken?.trim();
     const orgDomain = body.orgDomain?.trim();
     const projectName = body.projectName?.trim() || `relay-${Date.now().toString(36)}`;
+    const relaySecret = randomBytes(32).toString("hex");
 
     if (!orgDomain) {
       return NextResponse.json({ error: "Organization domain is required" }, { status: 400 });
@@ -103,7 +115,7 @@ export async function POST(request) {
         assets: {
           "main.ts": {
             kind: "file",
-            content: DENO_RELAY_CODE,
+            content: DENO_RELAY_CODE.replace("__RELAY_SECRET__", relaySecret),
             encoding: "utf-8",
           },
         },
@@ -165,6 +177,7 @@ export async function POST(request) {
       noProxy: "",
       isActive: true,
       strictProxy: false,
+      relaySecret,
     });
 
     return NextResponse.json({ proxyPool, deployUrl }, { status: 201 });
