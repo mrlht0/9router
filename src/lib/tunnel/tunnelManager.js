@@ -11,7 +11,7 @@ initDbHooks(getSettings, updateSettings);
 const WORKER_URL = process.env.TUNNEL_WORKER_URL || "https://9router.com";
 const MACHINE_ID_SALT = "9router-tunnel-salt";
 
-// Per-service state (independent: tunnel ≠ tailscale)
+// Per-service state (independent: tunnel ? tailscale)
 const tunnelSvc = {
   cancelToken: { cancelled: false },
   spawnInProgress: false,
@@ -43,8 +43,6 @@ function getMachineId() {
   }
 }
 
-// ─── Cloudflare Tunnel ───────────────────────────────────────────────────────
-
 async function registerTunnelUrl(shortId, tunnelUrl) {
   await fetch(`${WORKER_URL}/api/tunnel/register`, {
     method: "POST",
@@ -65,7 +63,7 @@ export async function enableTunnel(localPort = 20128) {
 
   try {
     if (isCloudflaredRunning()) {
-      const existing = loadState();
+      const existing = await loadState();
       if (existing?.tunnelUrl && await probeUrlAlive(existing.tunnelUrl)) {
         const publicUrl = `https://r${existing.shortId}.9router.com`;
         return { success: true, tunnelUrl: existing.tunnelUrl, shortId: existing.shortId, publicUrl, alreadyRunning: true };
@@ -76,7 +74,7 @@ export async function enableTunnel(localPort = 20128) {
     throwIfCancelled(token, "tunnel");
 
     const machineId = getMachineId();
-    const existing = loadState();
+    const existing = await loadState();
     const shortId = existing?.shortId || generateShortId();
 
     const onUrlUpdate = async (url) => {
@@ -94,7 +92,6 @@ export async function enableTunnel(localPort = 20128) {
     saveState({ shortId, machineId, tunnelUrl });
     await updateSettings({ tunnelEnabled: true, tunnelUrl });
 
-    // Block until /api/health responds via public URL — proves DNS propagated + tunnel works
     await waitForHealth(publicUrl, token);
 
     return { success: true, tunnelUrl, shortId, publicUrl };
@@ -108,7 +105,7 @@ export async function disableTunnel() {
   setUnexpectedExitHandler(null);
   killCloudflared(tunnelSvc.activeLocalPort);
 
-  const state = loadState();
+  const state = await loadState();
   if (state) saveState({ shortId: state.shortId, machineId: state.machineId, tunnelUrl: null });
 
   await updateSettings({ tunnelEnabled: false, tunnelUrl: "" });
@@ -116,7 +113,7 @@ export async function disableTunnel() {
 }
 
 export async function getTunnelStatus() {
-  const state = loadState();
+  const state = await loadState();
   const running = isCloudflaredRunning();
   const settings = await getSettings();
   const shortId = state?.shortId || "";
@@ -132,8 +129,6 @@ export async function getTunnelStatus() {
   };
 }
 
-// ─── Tailscale Funnel ─────────────────────────────────────────────────────────
-
 export async function enableTailscale(localPort = 20128) {
   tailscaleSvc.cancelToken = { cancelled: false };
   tailscaleSvc.activeLocalPort = localPort;
@@ -145,7 +140,7 @@ export async function enableTailscale(localPort = 20128) {
     await startDaemonWithPassword(sudoPass);
     throwIfCancelled(token, "tailscale");
 
-    const existing = loadState();
+    const existing = await loadState();
     const shortId = existing?.shortId || generateShortId();
     const tsHostname = shortId;
 
@@ -170,7 +165,6 @@ export async function enableTailscale(localPort = 20128) {
 
     await updateSettings({ tailscaleEnabled: true, tailscaleUrl: result.tunnelUrl });
 
-    // Verify funnel actually serves /api/health
     await waitForHealth(result.tunnelUrl, token);
 
     return { success: true, tunnelUrl: result.tunnelUrl };

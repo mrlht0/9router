@@ -124,6 +124,17 @@ export async function uploadLocalFileToDrive(localPath) {
   return true;
 }
 
+export async function deleteLocalFileFromDrive(localPath) {
+  const config = getDriveConfig();
+  if (!config.enabled) return false;
+  const fileName = path.basename(localPath);
+  const fileId = await findRemoteFileId(fileName);
+  if (!fileId) return false;
+  await deleteDriveItem(fileId);
+  console.log(`[DriveSync] deleted ${fileName} from Drive`);
+  return true;
+}
+
 export function isDriveSyncEnabled() {
   return getDriveConfig().enabled;
 }

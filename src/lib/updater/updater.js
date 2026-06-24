@@ -8,6 +8,7 @@ const net = require("net");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const { pathToFileURL } = require("url");
 
 const packageName = process.env.UPDATER_PKG_NAME || "9router";
 const port = parseInt(process.env.UPDATER_PORT || "20129", 10);
@@ -33,6 +34,19 @@ try { fs.mkdirSync(updateDir, { recursive: true }); } catch { /* best effort */ 
 const statusFile = path.join(updateDir, "status.json");
 const logFile = path.join(updateDir, "install.log");
 
+let driveModulePromise = null;
+function getDriveModule() {
+  if (!driveModulePromise) {
+    const ref = pathToFileURL(path.join(__dirname, "..", "driveDb.js")).href;
+    driveModulePromise = import(ref).catch(() => null);
+  }
+  return driveModulePromise;
+}
+
+function scheduleDriveSync(filePath) {
+  getDriveModule().then((mod) => mod?.scheduleDriveUpload?.(filePath)).catch(() => {});
+}
+
 const state = {
   phase: "starting",
   packageName,
@@ -52,11 +66,11 @@ function pushLog(line) {
   if (!trimmed) return;
   state.logTail.push(trimmed);
   if (state.logTail.length > tailLines) state.logTail = state.logTail.slice(-tailLines);
-  try { fs.appendFileSync(logFile, `${trimmed}\n`); } catch { /* best effort */ }
+  try { fs.appendFileSync(logFile, `${trimmed}\n`); scheduleDriveSync(logFile); } catch { /* best effort */ }
 }
 
 function persistStatus() {
-  try { fs.writeFileSync(statusFile, JSON.stringify(state, null, 2)); } catch { /* best effort */ }
+  try { fs.writeFileSync(statusFile, JSON.stringify(state, null, 2)); scheduleDriveSync(statusFile); } catch { /* best effort */ }
 }
 
 function setPhase(phase) {
@@ -131,7 +145,7 @@ function sleep(ms) {
 function runInstall() {
   state.attempt += 1;
   setPhase("installing");
-  pushLog(`[updater] attempt ${state.attempt}/${maxRetries} â€” npm i -g ${packageName} --prefer-online`);
+  pushLog(`[updater] attempt ${state.attempt}/${maxRetries} — npm i -g ${packageName} --prefer-online`);
 
   const isWin = process.platform === "win32";
   const cmd = isWin ? "npm.cmd" : "npm";

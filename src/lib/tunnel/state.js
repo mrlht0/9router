@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/dataDir.js";
+import { deleteLocalFileFromDrive, restoreLocalFileFromDrive, scheduleDriveUpload } from "@/lib/driveDb.js";
 
 const TUNNEL_DIR = path.join(DATA_DIR, "tunnel");
 const STATE_FILE = path.join(TUNNEL_DIR, "state.json");
@@ -13,8 +14,9 @@ function ensureDir() {
   }
 }
 
-export function loadState() {
+export async function loadState() {
   try {
+    await restoreLocalFileFromDrive(STATE_FILE).catch(() => false);
     if (fs.existsSync(STATE_FILE)) {
       return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     }
@@ -25,11 +27,13 @@ export function loadState() {
 export function saveState(state) {
   ensureDir();
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  scheduleDriveUpload(STATE_FILE);
 }
 
 export function clearState() {
   try {
     if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+    deleteLocalFileFromDrive(STATE_FILE).catch(() => false);
   } catch (e) { /* ignore */ }
 }
 

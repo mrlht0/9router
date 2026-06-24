@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/dataDir.js";
+import { deleteLocalFileFromDrive, restoreLocalFileFromDrive, scheduleDriveUpload } from "@/lib/driveDb.js";
 import { getSettings, updateSettings, runWithUserScope } from "@/lib/localDb";
 
 const TUNNEL_DIR = path.join(DATA_DIR, "tunnel");
@@ -23,9 +24,11 @@ function readLegacyStateSync() {
 function writeLegacyStateSync(state) {
   ensureTunnelDir();
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  scheduleDriveUpload(STATE_FILE);
 }
 
-export function loadState() {
+export async function loadState() {
+  await restoreLocalFileFromDrive(STATE_FILE).catch(() => false);
   return readLegacyStateSync();
 }
 
@@ -36,11 +39,13 @@ export function saveState(state) {
 export function clearState() {
   try {
     if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+    deleteLocalFileFromDrive(STATE_FILE).catch(() => false);
   } catch { /* ignore */ }
 }
 
 export async function getTunnelState() {
   const settings = await runWithUserScope(null, async () => await getSettings());
+  await restoreLocalFileFromDrive(STATE_FILE).catch(() => false);
   const legacy = readLegacyStateSync();
 
   const shortId = settings.tunnelShortId || settings.tailscaleShortId || legacy?.shortId || "";

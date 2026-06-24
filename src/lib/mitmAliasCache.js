@@ -1,9 +1,10 @@
-// JSON cache for mitmAlias — read by standalone MITM server (no SQLite native binding).
+// JSON cache for mitmAlias � read by standalone MITM server (no SQLite native binding).
 // Source of truth = DocumentDB-backed models. JSON is a read-replica synced on app start
 // and after every UI write.
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { restoreLocalFileFromDrive, scheduleDriveUpload } from "@/lib/driveDb.js";
 
 const DATA_DIR = process.env.DATA_DIR
   || (process.platform === "win32"
@@ -18,11 +19,13 @@ function writeAtomic(data) {
   const tmp = `${CACHE_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
   fs.renameSync(tmp, CACHE_FILE);
+  scheduleDriveUpload(CACHE_FILE);
 }
 
-// Sync entire mitmAlias map from DB → JSON file
+// Sync entire mitmAlias map from DB ? JSON file
 export async function syncToJson() {
   try {
+    await restoreLocalFileFromDrive(CACHE_FILE).catch(() => false);
     const { getMitmAlias } = await import("@/models");
     const all = await getMitmAlias();
     writeAtomic(all || {});
@@ -36,7 +39,7 @@ export function writeAliasForTool(tool, mappings) {
   try {
     let current = {};
     if (fs.existsSync(CACHE_FILE)) {
-      try { current = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")); } catch { /* corrupted → reset */ }
+      try { current = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")); } catch { /* corrupted ? reset */ }
     }
     current[tool] = mappings || {};
     writeAtomic(current);

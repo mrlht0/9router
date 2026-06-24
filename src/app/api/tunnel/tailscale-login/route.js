@@ -4,7 +4,7 @@ import { loadState, generateShortId } from "@/lib/tunnel/state.js";
 
 export async function POST() {
   try {
-    const shortId = loadState()?.shortId || generateShortId();
+    const shortId = (await loadState())?.shortId || generateShortId();
     const result = await startLogin(shortId);
     return NextResponse.json(result);
   } catch (error) {

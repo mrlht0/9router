@@ -30,7 +30,7 @@ export async function POST(request) {
     });
   }
 
-  const shortId = loadState()?.shortId || generateShortId();
+  const shortId = (await loadState())?.shortId || generateShortId();
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
