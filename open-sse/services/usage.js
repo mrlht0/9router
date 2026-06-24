@@ -3,7 +3,7 @@
  */
 
 import { getGitHubUsage } from "./usage/github.js";
-import { getGeminiUsage, getAntigravityUsage } from "./usage/google.js";
+import { getGeminiApiKeyUsage } from "./usage/gemini-apikey.js";
 import { getClaudeUsage } from "./usage/claude.js";
 import { getCodexUsage, consumeCodexRateLimitResetCredit } from "./usage/codex.js";
 

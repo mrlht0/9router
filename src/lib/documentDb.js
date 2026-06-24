@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import { MongoClient } from "mongodb";
 import { Pool } from "pg";
+import { isDriveSyncEnabled, loadJsonDocumentFromDrive, writeJsonDocumentToDrive } from "@/lib/driveDb.js";
 
 if (!global._documentDbState) {
   global._documentDbState = {
-    pgPool: null,
+    pgPools: new Map(),
+    activePgUrl: null,
     mongoClient: null,
     mongoConnectPromise: null,
     pgTableReady: new Map(),
@@ -13,12 +15,14 @@ if (!global._documentDbState) {
     backendStatus: {
       postgres: { enabled: false, connected: false, lastError: null, lastOkAt: 0 },
       mongo: { enabled: false, connected: false, lastError: null, lastOkAt: 0 },
+      drive: { enabled: false, connected: false, lastError: null, lastOkAt: 0 },
     },
     warmupPromise: null,
     documentCache: new Map(),
     loggedNamespaces: new Set(),
     lastWarmupLog: "",
     lastConfiguredLog: "",
+    roundRobinCursor: new Map(),
   };
 }
 
@@ -42,6 +46,9 @@ async function loadFromBackend(backend, namespace, defaultData, seedFilePath, se
   if (backend === "mongo") {
     return await withTimeout(loadFromMongo(namespace, defaultData, seedFilePath, seedFromFile), "MongoDB load");
   }
+  if (backend === "drive") {
+    return await withTimeout(loadFromDrive(namespace, defaultData), "Drive load");
+  }
   throw new Error(`Unsupported document database backend: ${backend}`);
 }
 function cloneDefaultData(defaultData) {
@@ -51,8 +58,15 @@ function cloneDefaultData(defaultData) {
   return JSON.parse(JSON.stringify(defaultData));
 }
 
+function getConfiguredPostgresUrls() {
+  const values = [process.env.DATABASE_URL, process.env.DATABASE_URL_1, process.env.POSTGRES_URL]
+    .map((value) => String(value || "").trim())
+    .filter((value) => /^postgres(ql)?:\/\//i.test(value));
+  return [...new Set(values)];
+}
+
 function getDatabaseUrl() {
-  return process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
+  return getConfiguredPostgresUrls()[0] || "";
 }
 
 function getMongoUrl() {
@@ -60,19 +74,31 @@ function getMongoUrl() {
 }
 
 export function isPostgresEnabled() {
-  return /^postgres(ql)?:\/\//i.test(getDatabaseUrl());
+  return getConfiguredPostgresUrls().length > 0;
 }
 
 export function isMongoEnabled() {
   return /^mongodb(\+srv)?:\/\//i.test(getMongoUrl());
 }
 
+export function isDriveEnabled() {
+  return isDriveSyncEnabled();
+}
+
 export function requirePostgres() {
   const value = getDatabaseUrl();
-  if (!/^postgres(ql)?:\/\//i.test(value)) {
+  if (!value) {
     throw new Error("PostgreSQL is required. Set DATABASE_URL=postgresql://user:password@host:5432/dbname");
   }
   return value;
+}
+
+export function getPostgresConnectionString() {
+  return requirePostgres();
+}
+
+export function getPostgresConnectionStrings() {
+  return getConfiguredPostgresUrls();
 }
 
 export function requireMongo() {
@@ -129,6 +155,7 @@ function logWarmupStatus() {
     `[DocumentDB] startup timeout=${DEFAULT_BACKEND_TIMEOUT_MS}ms`,
     formatBackendStatus("postgres"),
     formatBackendStatus("mongo"),
+    formatBackendStatus("drive"),
   ].join(" | ");
   if (state.lastWarmupLog === message) return;
   state.lastWarmupLog = message;
@@ -142,10 +169,9 @@ function logNamespaceSelection(namespace, backend, preferredBackends, syncBacken
   console.log(`[DocumentDB] namespace=${namespace} active=${backend} preferred=${preferredBackends.join(">")} sync=${syncBackends}`);
 }
 
-function getPgPool() {
-  if (!state.pgPool) {
-    const connectionString = requirePostgres();
-    state.pgPool = new Pool({
+function getOrCreatePgPool(connectionString) {
+  if (!state.pgPools.has(connectionString)) {
+    const pool = new Pool({
       connectionString,
       connectionTimeoutMillis: DEFAULT_BACKEND_TIMEOUT_MS,
       query_timeout: DEFAULT_BACKEND_TIMEOUT_MS,
@@ -153,12 +179,58 @@ function getPgPool() {
         ? { rejectUnauthorized: false }
         : undefined,
     });
-    state.pgPool.on("error", (error) => {
+    pool.on("error", (error) => {
       markBackendError("postgres", error);
-      warnBackendOnce("PostgreSQL pool error", error);
+      warnBackendOnce(`PostgreSQL pool error (${connectionString})`, error);
     });
+    state.pgPools.set(connectionString, pool);
   }
-  return state.pgPool;
+  return state.pgPools.get(connectionString);
+}
+
+async function queryPostgres(statement, params = []) {
+  const urls = getConfiguredPostgresUrls();
+  if (!urls.length) {
+    throw new Error("PostgreSQL is required. Set DATABASE_URL or DATABASE_URL_1.");
+  }
+  const orderedUrls = state.activePgUrl && urls.includes(state.activePgUrl)
+    ? [state.activePgUrl, ...urls.filter((url) => url !== state.activePgUrl)]
+    : urls;
+  const errors = [];
+  for (const connectionString of orderedUrls) {
+    try {
+      const pool = getOrCreatePgPool(connectionString);
+      const result = await withTimeout(pool.query(statement, params), `PostgreSQL query (${connectionString})`);
+      if (state.activePgUrl !== connectionString) {
+        console.log(`[DocumentDB] postgres failover active=${connectionString}`);
+      }
+      state.activePgUrl = connectionString;
+      markBackendOk("postgres");
+      return result;
+    } catch (error) {
+      markBackendError("postgres", error);
+      errors.push(`${connectionString}: ${error.message}`);
+      warnBackendOnce(`PostgreSQL query failed (${connectionString})`, error);
+    }
+  }
+  throw new Error(`All PostgreSQL connections failed. ${errors.join(" | ")}`);
+}
+
+function getPgPool() {
+  return {
+    query(statement, params) {
+      return queryPostgres(statement, params);
+    },
+  };
+}
+
+export function getSharedPgPool() {
+  return getPgPool();
+}
+
+export async function getSharedMongoDb() {
+  const client = await getMongoClient();
+  return client.db(getMongoDbName());
 }
 
 function getMongoDbName() {
@@ -198,8 +270,7 @@ async function getMongoClient() {
 
 async function ensurePgTable(namespace) {
   if (state.pgTableReady.has(namespace)) return;
-  const currentPool = getPgPool();
-  await currentPool.query(`
+  await queryPostgres(`
     CREATE TABLE IF NOT EXISTS app_documents (
       namespace TEXT PRIMARY KEY,
       data JSONB NOT NULL,
@@ -234,8 +305,7 @@ async function probePostgres() {
   if (!isPostgresEnabled()) return false;
   state.backendStatus.postgres.enabled = true;
   try {
-    const pool = getPgPool();
-    await withTimeout(pool.query("SELECT 1"), "PostgreSQL probe");
+    await queryPostgres("SELECT 1");
     markBackendOk("postgres");
     return true;
   } catch (error) {
@@ -262,13 +332,13 @@ async function probeMongo() {
 
 async function warmBackends() {
   if (!state.warmupPromise) {
-    const configuredMessage = `[DocumentDB] startup configured postgres=${isPostgresEnabled() ? "enabled" : "disabled"} mongo=${isMongoEnabled() ? "enabled" : "disabled"} timeout=${DEFAULT_BACKEND_TIMEOUT_MS}ms`;
+    const configuredMessage = `[DocumentDB] startup configured postgres=${isPostgresEnabled() ? "enabled" : "disabled"} mongo=${isMongoEnabled() ? "enabled" : "disabled"} drive=${isDriveEnabled() ? "enabled" : "disabled"} timeout=${DEFAULT_BACKEND_TIMEOUT_MS}ms`;
     if (state.lastConfiguredLog !== configuredMessage) {
       state.lastConfiguredLog = configuredMessage;
       console.log(configuredMessage);
     }
     state.warmupPromise = (async () => {
-      await Promise.allSettled([probePostgres(), probeMongo()]);
+      await Promise.allSettled([probePostgres(), probeMongo(), probeDrive()]);
       logWarmupStatus();
     })().finally(() => {
       state.warmupPromise = null;
@@ -282,13 +352,24 @@ export async function warmDocumentDbBackends() {
   return {
     postgres: { ...state.backendStatus.postgres },
     mongo: { ...state.backendStatus.mongo },
+    drive: { ...state.backendStatus.drive },
   };
+}
+
+function getRoundRobinOrder(namespace, backends) {
+  if (!Array.isArray(backends) || backends.length <= 1) return [...backends];
+  const cursor = state.roundRobinCursor.get(namespace) || 0;
+  const start = cursor % backends.length;
+  const ordered = backends.slice(start).concat(backends.slice(0, start));
+  state.roundRobinCursor.set(namespace, (cursor + 1) % backends.length);
+  return ordered;
 }
 
 function normalizeBackendList(preferredBackends) {
   const configured = [];
   if (isPostgresEnabled()) configured.push("postgres");
   if (isMongoEnabled()) configured.push("mongo");
+  if (isDriveEnabled()) configured.push("drive");
 
   const requested = Array.isArray(preferredBackends) && preferredBackends.length > 0
     ? preferredBackends
@@ -304,14 +385,18 @@ function normalizeBackendList(preferredBackends) {
   return ordered;
 }
 
-function getPreferredBackendOrder(preferredBackends) {
-  const order = normalizeBackendList(preferredBackends);
+function getPreferredBackendOrder(namespace, preferredBackends, balanceBackends = false) {
+  const baseOrder = normalizeBackendList(preferredBackends);
+  const primaryBackends = baseOrder.filter((backend) => backend !== "drive");
+  const backupBackends = baseOrder.filter((backend) => backend === "drive");
+  const rotatedPrimary = balanceBackends ? getRoundRobinOrder(namespace, primaryBackends) : [...primaryBackends];
+  const order = [...rotatedPrimary, ...backupBackends];
 
   order.sort((a, b) => {
     const aConnected = state.backendStatus[a]?.connected ? 1 : 0;
     const bConnected = state.backendStatus[b]?.connected ? 1 : 0;
     if (aConnected !== bConnected) return bConnected - aConnected;
-    return normalizeBackendList(preferredBackends).indexOf(a) - normalizeBackendList(preferredBackends).indexOf(b);
+    return baseOrder.indexOf(a) - baseOrder.indexOf(b);
   });
 
   return order;
@@ -321,15 +406,14 @@ async function loadFromPostgres(namespace, defaultData, seedFilePath = "", seedF
   const defaults = cloneDefaultData(defaultData);
   await ensurePgTable(namespace);
 
-  const currentPool = getPgPool();
-  const existing = await currentPool.query(
+  const existing = await queryPostgres(
     "SELECT data FROM app_documents WHERE namespace = $1",
     [namespace]
   );
 
   if (existing.rowCount === 0) {
     const seedData = await readSeedFile(seedFilePath, defaults, seedFromFile);
-    await currentPool.query(
+    await queryPostgres(
       `INSERT INTO app_documents (namespace, data, updated_at)
        VALUES ($1, $2::jsonb, NOW())
        ON CONFLICT (namespace) DO NOTHING`,
@@ -345,8 +429,7 @@ async function loadFromPostgres(namespace, defaultData, seedFilePath = "", seedF
 
 async function writeToPostgres(namespace, data) {
   await ensurePgTable(namespace);
-  const currentPool = getPgPool();
-  await currentPool.query(
+  await queryPostgres(
     `INSERT INTO app_documents (namespace, data, updated_at)
      VALUES ($1, $2::jsonb, NOW())
      ON CONFLICT (namespace) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
@@ -385,6 +468,19 @@ async function loadFromMongo(namespace, defaultData, seedFilePath = "", seedFrom
   return existing.data ?? defaults;
 }
 
+async function loadFromDrive(namespace, defaultData) {
+  const fileName = `app_documents__${namespace}.json`;
+  const data = await loadJsonDocumentFromDrive(fileName, cloneDefaultData(defaultData));
+  markBackendOk("drive");
+  return data ?? cloneDefaultData(defaultData);
+}
+
+async function writeToDrive(namespace, data) {
+  const fileName = `app_documents__${namespace}.json`;
+  await writeJsonDocumentToDrive(fileName, data);
+  markBackendOk("drive");
+}
+
 async function writeToMongo(namespace, data) {
   const collectionName = "app_documents";
   await ensureMongoIndex(collectionName);
@@ -404,6 +500,19 @@ async function writeToMongo(namespace, data) {
   markBackendOk("mongo");
 }
 
+async function probeDrive() {
+  if (!isDriveEnabled()) return false;
+  state.backendStatus.drive.enabled = true;
+  try {
+    markBackendOk("drive");
+    return true;
+  } catch (error) {
+    markBackendError("drive", error);
+    warnBackendOnce("Drive unavailable", error);
+    return false;
+  }
+}
+
 async function syncSecondaryBackends(primaryBackend, namespace, data, preferredBackends) {
   const syncTargets = normalizeBackendList(preferredBackends).filter((backend) => backend !== primaryBackend);
   await Promise.allSettled(syncTargets.map(async (backend) => {
@@ -412,6 +521,8 @@ async function syncSecondaryBackends(primaryBackend, namespace, data, preferredB
         await withTimeout(writeToPostgres(namespace, data), `${backend} secondary sync`);
       } else if (backend === "mongo") {
         await withTimeout(writeToMongo(namespace, data), `${backend} secondary sync`);
+      } else if (backend === "drive") {
+        await withTimeout(writeToDrive(namespace, data), `${backend} secondary sync`);
       }
     } catch (error) {
       markBackendError(backend, error);
@@ -425,6 +536,7 @@ export async function createDocumentDb(namespace, defaultData, seedFilePath = ""
     preferredBackends = ["postgres", "mongo"],
     syncBackends = true,
     seedFromFile = false,
+    balanceBackends = false,
   } = options;
 
   await warmBackends();
@@ -438,7 +550,7 @@ export async function createDocumentDb(namespace, defaultData, seedFilePath = ""
   let activeBackend = null;
   let data = null;
 
-  const orderedBackends = getPreferredBackendOrder(preferredBackends);
+  const orderedBackends = getPreferredBackendOrder(namespace, preferredBackends, balanceBackends);
 
   for (const backend of orderedBackends) {
     try {
@@ -484,7 +596,7 @@ export async function createDocumentDb(namespace, defaultData, seedFilePath = ""
     backend: activeBackend,
     async write() {
       const payload = this.data;
-      const orderedBackends = [this.backend, ...getPreferredBackendOrder(preferredBackends).filter((backend) => backend !== this.backend)];
+      const orderedBackends = balanceBackends ? getPreferredBackendOrder(namespace, preferredBackends, true) : [this.backend, ...getPreferredBackendOrder(namespace, preferredBackends, false).filter((backend) => backend !== this.backend)];
       const writeErrors = [];
 
       for (const backend of orderedBackends) {
@@ -493,6 +605,8 @@ export async function createDocumentDb(namespace, defaultData, seedFilePath = ""
             await withTimeout(writeToPostgres(namespace, payload), "PostgreSQL write");
           } else if (backend === "mongo") {
             await withTimeout(writeToMongo(namespace, payload), "MongoDB write");
+          } else if (backend === "drive") {
+            await withTimeout(writeToDrive(namespace, payload), "Drive write");
           }
 
           if (this.backend !== backend) {
@@ -515,5 +629,7 @@ export async function createDocumentDb(namespace, defaultData, seedFilePath = ""
   state.documentCache.set(cacheKey, documentHandle);
   return documentHandle;
 }
+
+
 
 

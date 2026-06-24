@@ -9,7 +9,8 @@ import {
   runWithApiKeyScope,
 } from "../services/auth.js";
 import { cacheClaudeHeaders } from "open-sse/utils/claudeHeaderCache.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, runWithUserScope } from "@/lib/localDb";
+import { getDashboardAuthSession } from "@/lib/auth/dashboardSession";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -20,6 +21,35 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+
+function extractAuthToken(request) {
+  const cookieHeader = request?.headers?.get?.("cookie") || "";
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed.startsWith("auth_token=")) continue;
+    return decodeURIComponent(trimmed.slice("auth_token=".length));
+  }
+  return null;
+}
+
+async function runWithRequestScope(request, apiKey, fn) {
+  if (apiKey) {
+    return await runWithApiKeyScope(apiKey, fn);
+  }
+
+  const authToken = extractAuthToken(request);
+  if (!authToken) {
+    return await fn();
+  }
+
+  const session = await getDashboardAuthSession(authToken);
+  if (!session?.userId) {
+    return await fn();
+  }
+
+  return await runWithUserScope(session.userId, fn);
+}
 
 /**
  * Handle chat completion request
@@ -66,9 +96,7 @@ export async function handleChat(request, clientRawRequest = null) {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  return await (apiKey
-    ? runWithApiKeyScope(apiKey, async () => executeChatRequest())
-    : executeChatRequest());
+  return await runWithRequestScope(request, apiKey, async () => executeChatRequest());
 
   async function executeChatRequest() {
     // Enforce API key if enabled in settings

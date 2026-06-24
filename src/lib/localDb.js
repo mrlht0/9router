@@ -227,6 +227,7 @@ async function getAuthDb() {
     preferredBackends: ["mongo", "postgres"],
     syncBackends: true,
     seedFromFile: false,
+    balanceBackends: true,
   });
   if (!authDb.data || typeof authDb.data !== "object") authDb.data = cloneAuthData();
   if (!Array.isArray(authDb.data.users)) authDb.data.users = [];
@@ -252,6 +253,7 @@ export async function getDb() {
     preferredBackends: ["postgres", "mongo"],
     syncBackends: true,
     seedFromFile: false,
+    balanceBackends: true,
   });
   const { data, changed } = ensureDbShape(pgDb.data);
   pgDb.data = data;
@@ -1008,4 +1010,5 @@ export async function resetAllPricing() {
   await safeWrite(db);
   return scope.pricing;
 }
+
 

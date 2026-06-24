@@ -245,9 +245,17 @@ export async function proxy(request) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  // Redirect / to /dashboard if logged in, or /dashboard if it's the root
+  // Route the root entrypoint according to auth state.
   if (pathname === "/") {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+    const settings = await loadSettings();
+    const requireLogin = settings ? settings.requireLogin !== false : true;
+    if (!requireLogin) {
+      return NextResponse.redirect(new URL("/dashboard", request.url));
+    }
+    if (await hasValidToken(request)) {
+      return NextResponse.redirect(new URL("/dashboard", request.url));
+    }
+    return NextResponse.redirect(new URL("/login", request.url));
   }
 
   return NextResponse.next();

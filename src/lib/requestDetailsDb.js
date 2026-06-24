@@ -1,21 +1,33 @@
 import path from "node:path";
 import fs from "node:fs";
 import { DATA_DIR } from "@/lib/dataDir.js";
-import { createDocumentDb } from "@/lib/documentDb.js";
+import { restoreLocalFileFromDrive, scheduleDriveUpload } from "@/lib/driveDb.js";
 import { getCurrentUserScopeId, getUserScopeFromContext } from "@/lib/localDb.js";
 
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
-const DEFAULT_MAX_JSON_SIZE = 5 * 1024; // 5KB default, configurable via settings
+const DEFAULT_MAX_JSON_SIZE = 5 * 1024;
 const CONFIG_CACHE_TTL_MS = 5000;
-const MAX_TOTAL_DB_SIZE = 50 * 1024 * 1024; // 50MB hard limit for total DB payload
+const MAX_LOCAL_FILE_SIZE = 25 * 1024 * 1024;
 const RETENTION_MONTHS = 5;
-const DB_FILE = path.join(DATA_DIR, "request-details.json");
+const DB_FILE = path.join(DATA_DIR, "request-details.local.json");
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+
+if (!global._requestDetailsLocalState) {
+  global._requestDetailsLocalState = {
+    data: { records: [] },
+    loaded: false,
+    writeBuffer: [],
+    flushTimer: null,
+    isFlushing: false,
+  };
+}
+
+const state = global._requestDetailsLocalState;
 
 async function resolveOwnerId() {
   const scoped = getUserScopeFromContext();
@@ -34,31 +46,34 @@ function pruneRecords(records) {
   return records.filter((record) => new Date(record.timestamp || 0).getTime() >= cutoffTime);
 }
 
-async function getDb() {
-  const pgDb = await createDocumentDb("requestDetailsDb", { records: [] }, DB_FILE, {
-    preferredBackends: ["postgres"],
-    syncBackends: false,
-    seedFromFile: false,
-  });
-  if (!pgDb.data?.records) {
-    pgDb.data = { records: [] };
-    await pgDb.write();
+async function ensureLocalDbLoaded() {
+  if (state.loaded) return;
+  await restoreLocalFileFromDrive(DB_FILE).catch(() => false);
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      const raw = fs.readFileSync(DB_FILE, "utf8");
+      const parsed = JSON.parse(raw || "{}");
+      state.data = parsed && typeof parsed === "object" ? parsed : { records: [] };
+    }
+  } catch {
+    state.data = { records: [] };
   }
-  const before = pgDb.data.records.length;
-  pgDb.data.records = pruneRecords(pgDb.data.records);
-  if (pgDb.data.records.length !== before) await pgDb.write();
-  return pgDb;
+  if (!Array.isArray(state.data.records)) state.data.records = [];
+  state.data.records = pruneRecords(state.data.records);
+  state.loaded = true;
 }
 
-// Config cache
+function persistLocalDb() {
+  const payload = JSON.stringify(state.data);
+  fs.writeFileSync(DB_FILE, payload, "utf8");
+  scheduleDriveUpload(DB_FILE);
+}
+
 let cachedConfig = null;
 let cachedConfigTs = 0;
 
 async function getObservabilityConfig() {
-  if (cachedConfig && (Date.now() - cachedConfigTs) < CONFIG_CACHE_TTL_MS) {
-    return cachedConfig;
-  }
-
+  if (cachedConfig && (Date.now() - cachedConfigTs) < CONFIG_CACHE_TTL_MS) return cachedConfig;
   try {
     const { getSettings } = await import("@/lib/localDb");
     const settings = await getSettings();
@@ -66,7 +81,6 @@ async function getObservabilityConfig() {
     const enabled = typeof settings.enableObservability === "boolean"
       ? settings.enableObservability
       : envEnabled;
-
     cachedConfig = {
       enabled,
       maxRecords: settings.observabilityMaxRecords || parseInt(process.env.OBSERVABILITY_MAX_RECORDS || String(DEFAULT_MAX_RECORDS), 10),
@@ -83,26 +97,8 @@ async function getObservabilityConfig() {
       maxJsonSize: DEFAULT_MAX_JSON_SIZE,
     };
   }
-
   cachedConfigTs = Date.now();
   return cachedConfig;
-}
-
-// Batch write queue
-let writeBuffer = [];
-let flushTimer = null;
-let isFlushing = false;
-
-function safeJsonStringify(obj, maxSize) {
-  try {
-    const str = JSON.stringify(obj);
-    if (str.length > maxSize) {
-      return JSON.stringify({ _truncated: true, _originalSize: str.length, _preview: str.substring(0, 200) });
-    }
-    return str;
-  } catch {
-    return "{}";
-  }
 }
 
 function sanitizeHeaders(headers) {
@@ -110,7 +106,7 @@ function sanitizeHeaders(headers) {
   const sensitiveKeys = ["authorization", "x-api-key", "cookie", "token", "api-key"];
   const sanitized = { ...headers };
   for (const key of Object.keys(sanitized)) {
-    if (sensitiveKeys.some(s => key.toLowerCase().includes(s))) {
+    if (sensitiveKeys.some((s) => key.toLowerCase().includes(s))) {
       delete sanitized[key];
     }
   }
@@ -125,14 +121,12 @@ function generateDetailId(model) {
 }
 
 async function flushToDatabase() {
-  if (isFlushing || writeBuffer.length === 0) return;
-
-  isFlushing = true;
+  if (state.isFlushing || state.writeBuffer.length === 0) return;
+  state.isFlushing = true;
   try {
-    const itemsToSave = [...writeBuffer];
-    writeBuffer = [];
-
-    const db = await getDb();
+    await ensureLocalDbLoaded();
+    const itemsToSave = [...state.writeBuffer];
+    state.writeBuffer = [];
     const config = await getObservabilityConfig();
 
     for (const item of itemsToSave) {
@@ -140,7 +134,6 @@ async function flushToDatabase() {
       if (!item.timestamp) item.timestamp = new Date().toISOString();
       if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
 
-      // Serialize large fields
       const record = {
         id: item.id,
         ownerId: item.ownerId || null,
@@ -157,7 +150,6 @@ async function flushToDatabase() {
         response: item.response || {},
       };
 
-      // Truncate oversized JSON fields
       const maxSize = config.maxJsonSize;
       for (const field of ["request", "providerRequest", "providerResponse", "response"]) {
         const str = JSON.stringify(record[field]);
@@ -166,34 +158,28 @@ async function flushToDatabase() {
         }
       }
 
-      // Upsert: replace existing record with same id
-      const idx = db.data.records.findIndex(r => r.id === record.id);
-      if (idx !== -1) {
-        db.data.records[idx] = record;
-      } else {
-        db.data.records.push(record);
-      }
+      const idx = state.data.records.findIndex((r) => r.id === record.id);
+      if (idx !== -1) state.data.records[idx] = record;
+      else state.data.records.push(record);
     }
 
-    // Keep only latest maxRecords (sorted by timestamp desc)
-    db.data.records = pruneRecords(db.data.records);
-    db.data.records.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    if (db.data.records.length > config.maxRecords) {
-      db.data.records = db.data.records.slice(0, config.maxRecords);
+    state.data.records = pruneRecords(state.data.records);
+    state.data.records.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    if (state.data.records.length > config.maxRecords) {
+      state.data.records = state.data.records.slice(0, config.maxRecords);
     }
 
-    // Shrink records until total serialized size is within safe limit
-    while (db.data.records.length > 1) {
-      const totalSize = Buffer.byteLength(JSON.stringify(db.data), "utf8");
-      if (totalSize <= MAX_TOTAL_DB_SIZE) break;
-      db.data.records = db.data.records.slice(0, Math.floor(db.data.records.length / 2));
+    while (state.data.records.length > 1) {
+      const totalSize = Buffer.byteLength(JSON.stringify(state.data), "utf8");
+      if (totalSize <= MAX_LOCAL_FILE_SIZE) break;
+      state.data.records = state.data.records.slice(0, Math.floor(state.data.records.length / 2));
     }
 
-    await db.write();
+    persistLocalDb();
   } catch (error) {
-    console.error("[requestDetailsDb] Batch write failed:", error);
+    console.error("[requestDetailsDb] Local batch write failed:", error);
   } finally {
-    isFlushing = false;
+    state.isFlushing = false;
   }
 }
 
@@ -202,33 +188,34 @@ export async function saveRequestDetail(detail) {
   if (!config.enabled) return;
 
   detail.ownerId = await resolveOwnerId();
-  writeBuffer.push(detail);
+  state.writeBuffer.push(detail);
 
-  if (writeBuffer.length >= config.batchSize) {
+  if (state.writeBuffer.length >= config.batchSize) {
     await flushToDatabase();
-    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-  } else if (!flushTimer) {
-    flushTimer = setTimeout(() => {
+    if (state.flushTimer) {
+      clearTimeout(state.flushTimer);
+      state.flushTimer = null;
+    }
+  } else if (!state.flushTimer) {
+    state.flushTimer = setTimeout(() => {
       flushToDatabase().catch(() => {});
-      flushTimer = null;
+      state.flushTimer = null;
     }, config.flushIntervalMs);
   }
 }
 
 export async function getRequestDetails(filter = {}) {
-  const db = await getDb();
+  await ensureLocalDbLoaded();
   const ownerId = await resolveOwnerId();
-  let records = [...db.data.records].filter((r) => (r.ownerId || null) === (ownerId || null));
+  let records = [...state.data.records].filter((r) => (r.ownerId || null) === (ownerId || null));
 
-  // Apply filters
-  if (filter.provider) records = records.filter(r => r.provider === filter.provider);
-  if (filter.model) records = records.filter(r => r.model === filter.model);
-  if (filter.connectionId) records = records.filter(r => r.connectionId === filter.connectionId);
-  if (filter.status) records = records.filter(r => r.status === filter.status);
-  if (filter.startDate) records = records.filter(r => new Date(r.timestamp) >= new Date(filter.startDate));
-  if (filter.endDate) records = records.filter(r => new Date(r.timestamp) <= new Date(filter.endDate));
+  if (filter.provider) records = records.filter((r) => r.provider === filter.provider);
+  if (filter.model) records = records.filter((r) => r.model === filter.model);
+  if (filter.connectionId) records = records.filter((r) => r.connectionId === filter.connectionId);
+  if (filter.status) records = records.filter((r) => r.status === filter.status);
+  if (filter.startDate) records = records.filter((r) => new Date(r.timestamp) >= new Date(filter.startDate));
+  if (filter.endDate) records = records.filter((r) => new Date(r.timestamp) <= new Date(filter.endDate));
 
-  // Sort desc
   records.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
   const totalItems = records.length;
@@ -244,29 +231,24 @@ export async function getRequestDetails(filter = {}) {
 }
 
 export async function getRequestDetailById(id) {
-  const db = await getDb();
+  await ensureLocalDbLoaded();
   const ownerId = await resolveOwnerId();
-  return db.data.records.find(r => r.id === id && (r.ownerId || null) === (ownerId || null)) || null;
+  return state.data.records.find((r) => r.id === id && (r.ownerId || null) === (ownerId || null)) || null;
 }
 
-// Graceful shutdown — use named handler so we can remove it on re-registration
-const _shutdownHandler = async () => {
-  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-  if (writeBuffer.length > 0) await flushToDatabase();
+const shutdownHandler = async () => {
+  if (state.flushTimer) {
+    clearTimeout(state.flushTimer);
+    state.flushTimer = null;
+  }
+  if (state.writeBuffer.length > 0) await flushToDatabase();
 };
 
-function ensureShutdownHandler() {
-  // Remove any previously registered listeners from this module (hot-reload safety)
-  process.off("beforeExit", _shutdownHandler);
-  process.off("SIGINT", _shutdownHandler);
-  process.off("SIGTERM", _shutdownHandler);
-  process.off("exit", _shutdownHandler);
-
-  process.on("beforeExit", _shutdownHandler);
-  process.on("SIGINT", _shutdownHandler);
-  process.on("SIGTERM", _shutdownHandler);
-  process.on("exit", _shutdownHandler);
-}
-
-ensureShutdownHandler();
-
+process.off("beforeExit", shutdownHandler);
+process.off("SIGINT", shutdownHandler);
+process.off("SIGTERM", shutdownHandler);
+process.off("exit", shutdownHandler);
+process.on("beforeExit", shutdownHandler);
+process.on("SIGINT", shutdownHandler);
+process.on("SIGTERM", shutdownHandler);
+process.on("exit", shutdownHandler);
