@@ -11,23 +11,41 @@ const DEFAULT_MAX_JSON_SIZE = 5 * 1024;
 const CONFIG_CACHE_TTL_MS = 5000;
 const MAX_LOCAL_FILE_SIZE = 25 * 1024 * 1024;
 const RETENTION_MONTHS = 5;
-const DB_FILE = path.join(DATA_DIR, "request-details.local.json");
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!global._requestDetailsLocalState) {
-  global._requestDetailsLocalState = {
-    data: { records: [] },
-    loaded: false,
-    writeBuffer: [],
-    flushTimer: null,
-    isFlushing: false,
-  };
+  global._requestDetailsLocalState = { scopes: new Map() };
 }
 
 const state = global._requestDetailsLocalState;
+
+function sanitizeOwnerId(ownerId) {
+  return String(ownerId || "global").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function getDbFile(ownerId = null) {
+  return path.join(DATA_DIR, ownerId ? `request-details.${sanitizeOwnerId(ownerId)}.local.json` : "request-details.local.json");
+}
+
+function getScopeKey(ownerId = null) {
+  return ownerId || "__global__";
+}
+
+function getScopeState(ownerId = null) {
+  const key = getScopeKey(ownerId);
+  if (!state.scopes.has(key)) {
+    state.scopes.set(key, {
+      ownerId,
+      file: getDbFile(ownerId),
+      data: { records: [] },
+      loaded: false,
+      writeBuffer: [],
+      flushTimer: null,
+      isFlushing: false,
+    });
+  }
+  return state.scopes.get(key);
+}
 
 async function resolveOwnerId() {
   const scoped = getUserScopeFromContext();
@@ -46,27 +64,30 @@ function pruneRecords(records) {
   return records.filter((record) => new Date(record.timestamp || 0).getTime() >= cutoffTime);
 }
 
-async function ensureLocalDbLoaded() {
-  if (state.loaded) return;
-  await restoreLocalFileFromDrive(DB_FILE).catch(() => false);
+async function ensureLocalDbLoaded(ownerId = null) {
+  const scope = getScopeState(ownerId);
+  if (scope.loaded) return scope;
+  await restoreLocalFileFromDrive(scope.file).catch(() => false);
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const raw = fs.readFileSync(DB_FILE, "utf8");
+    if (fs.existsSync(scope.file)) {
+      const raw = fs.readFileSync(scope.file, "utf8");
       const parsed = JSON.parse(raw || "{}");
-      state.data = parsed && typeof parsed === "object" ? parsed : { records: [] };
+      scope.data = parsed && typeof parsed === "object" ? parsed : { records: [] };
     }
   } catch {
-    state.data = { records: [] };
+    scope.data = { records: [] };
   }
-  if (!Array.isArray(state.data.records)) state.data.records = [];
-  state.data.records = pruneRecords(state.data.records);
-  state.loaded = true;
+  if (!Array.isArray(scope.data.records)) scope.data.records = [];
+  scope.data.records = pruneRecords(scope.data.records);
+  scope.loaded = true;
+  return scope;
 }
 
-function persistLocalDb() {
-  const payload = JSON.stringify(state.data);
-  fs.writeFileSync(DB_FILE, payload, "utf8");
-  scheduleDriveUpload(DB_FILE);
+function persistLocalDb(ownerId = null) {
+  const scope = getScopeState(ownerId);
+  const payload = JSON.stringify(scope.data);
+  fs.writeFileSync(scope.file, payload, "utf8");
+  scheduleDriveUpload(scope.file);
 }
 
 let cachedConfig = null;
@@ -120,13 +141,14 @@ function generateDetailId(model) {
   return `${timestamp}-${random}-${modelPart}`;
 }
 
-async function flushToDatabase() {
-  if (state.isFlushing || state.writeBuffer.length === 0) return;
-  state.isFlushing = true;
+async function flushToDatabase(ownerId = null) {
+  const scope = getScopeState(ownerId);
+  if (scope.isFlushing || scope.writeBuffer.length === 0) return;
+  scope.isFlushing = true;
   try {
-    await ensureLocalDbLoaded();
-    const itemsToSave = [...state.writeBuffer];
-    state.writeBuffer = [];
+    await ensureLocalDbLoaded(ownerId);
+    const itemsToSave = [...scope.writeBuffer];
+    scope.writeBuffer = [];
     const config = await getObservabilityConfig();
 
     for (const item of itemsToSave) {
@@ -136,7 +158,7 @@ async function flushToDatabase() {
 
       const record = {
         id: item.id,
-        ownerId: item.ownerId || null,
+        ownerId: ownerId || null,
         provider: item.provider || null,
         model: item.model || null,
         connectionId: item.connectionId || null,
@@ -158,28 +180,28 @@ async function flushToDatabase() {
         }
       }
 
-      const idx = state.data.records.findIndex((r) => r.id === record.id);
-      if (idx !== -1) state.data.records[idx] = record;
-      else state.data.records.push(record);
+      const idx = scope.data.records.findIndex((r) => r.id === record.id);
+      if (idx !== -1) scope.data.records[idx] = record;
+      else scope.data.records.push(record);
     }
 
-    state.data.records = pruneRecords(state.data.records);
-    state.data.records.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    if (state.data.records.length > config.maxRecords) {
-      state.data.records = state.data.records.slice(0, config.maxRecords);
+    scope.data.records = pruneRecords(scope.data.records);
+    scope.data.records.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    if (scope.data.records.length > config.maxRecords) {
+      scope.data.records = scope.data.records.slice(0, config.maxRecords);
     }
 
-    while (state.data.records.length > 1) {
-      const totalSize = Buffer.byteLength(JSON.stringify(state.data), "utf8");
+    while (scope.data.records.length > 1) {
+      const totalSize = Buffer.byteLength(JSON.stringify(scope.data), "utf8");
       if (totalSize <= MAX_LOCAL_FILE_SIZE) break;
-      state.data.records = state.data.records.slice(0, Math.floor(state.data.records.length / 2));
+      scope.data.records = scope.data.records.slice(0, Math.floor(scope.data.records.length / 2));
     }
 
-    persistLocalDb();
+    persistLocalDb(ownerId);
   } catch (error) {
     console.error("[requestDetailsDb] Local batch write failed:", error);
   } finally {
-    state.isFlushing = false;
+    scope.isFlushing = false;
   }
 }
 
@@ -187,27 +209,29 @@ export async function saveRequestDetail(detail) {
   const config = await getObservabilityConfig();
   if (!config.enabled) return;
 
-  detail.ownerId = await resolveOwnerId();
-  state.writeBuffer.push(detail);
+  const ownerId = await resolveOwnerId();
+  const scope = getScopeState(ownerId);
+  detail.ownerId = ownerId || null;
+  scope.writeBuffer.push(detail);
 
-  if (state.writeBuffer.length >= config.batchSize) {
-    await flushToDatabase();
-    if (state.flushTimer) {
-      clearTimeout(state.flushTimer);
-      state.flushTimer = null;
+  if (scope.writeBuffer.length >= config.batchSize) {
+    await flushToDatabase(ownerId);
+    if (scope.flushTimer) {
+      clearTimeout(scope.flushTimer);
+      scope.flushTimer = null;
     }
-  } else if (!state.flushTimer) {
-    state.flushTimer = setTimeout(() => {
-      flushToDatabase().catch(() => {});
-      state.flushTimer = null;
+  } else if (!scope.flushTimer) {
+    scope.flushTimer = setTimeout(() => {
+      flushToDatabase(ownerId).catch(() => {});
+      scope.flushTimer = null;
     }, config.flushIntervalMs);
   }
 }
 
 export async function getRequestDetails(filter = {}) {
-  await ensureLocalDbLoaded();
   const ownerId = await resolveOwnerId();
-  let records = [...state.data.records].filter((r) => (r.ownerId || null) === (ownerId || null));
+  const scope = await ensureLocalDbLoaded(ownerId);
+  let records = [...scope.data.records];
 
   if (filter.provider) records = records.filter((r) => r.provider === filter.provider);
   if (filter.model) records = records.filter((r) => r.model === filter.model);
@@ -231,17 +255,19 @@ export async function getRequestDetails(filter = {}) {
 }
 
 export async function getRequestDetailById(id) {
-  await ensureLocalDbLoaded();
   const ownerId = await resolveOwnerId();
-  return state.data.records.find((r) => r.id === id && (r.ownerId || null) === (ownerId || null)) || null;
+  const scope = await ensureLocalDbLoaded(ownerId);
+  return scope.data.records.find((r) => r.id === id) || null;
 }
 
 const shutdownHandler = async () => {
-  if (state.flushTimer) {
-    clearTimeout(state.flushTimer);
-    state.flushTimer = null;
+  for (const scope of state.scopes.values()) {
+    if (scope.flushTimer) {
+      clearTimeout(scope.flushTimer);
+      scope.flushTimer = null;
+    }
+    if (scope.writeBuffer.length > 0) await flushToDatabase(scope.ownerId || null);
   }
-  if (state.writeBuffer.length > 0) await flushToDatabase();
 };
 
 process.off("beforeExit", shutdownHandler);

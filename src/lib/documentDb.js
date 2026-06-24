@@ -591,11 +591,15 @@ export async function createDocumentDb(namespace, defaultData, seedFilePath = ""
 
   logNamespaceSelection(namespace, activeBackend, preferredBackends, syncBackends);
 
+  let lastPersistedSnapshot = stableStringify(data);
+
   const documentHandle = {
     data,
     backend: activeBackend,
     async write() {
       const payload = this.data;
+      const payloadSnapshot = stableStringify(payload);
+      if (payloadSnapshot === lastPersistedSnapshot) return;
       const orderedBackends = balanceBackends ? getPreferredBackendOrder(namespace, preferredBackends, true) : [this.backend, ...getPreferredBackendOrder(namespace, preferredBackends, false).filter((backend) => backend !== this.backend)];
       const writeErrors = [];
 
@@ -614,6 +618,7 @@ export async function createDocumentDb(namespace, defaultData, seedFilePath = ""
           }
           this.backend = backend;
           if (syncBackends) await syncSecondaryBackends(backend, namespace, payload, preferredBackends);
+          lastPersistedSnapshot = payloadSnapshot;
           return;
         } catch (error) {
           markBackendError(backend, error);

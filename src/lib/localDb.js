@@ -8,6 +8,9 @@ import { createDocumentDb } from "@/lib/documentDb.js";
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const AUTH_DB_FILE = path.join(DATA_DIR, "auth.json");
+const LOCAL_DB_NAMESPACE = "localDb";
+const LOCAL_DB_SCOPE_PREFIX = "localDbScope__";
+const LOCAL_DB_WRITE_DEBOUNCE_MS = Math.max(0, Number(process.env.LOCAL_DB_WRITE_DEBOUNCE_MS || 25));
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -67,6 +70,24 @@ function cloneDefaultData() {
 
 function cloneAuthData() {
   return { users: [] };
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function sanitizeScopeKey(value) {
+  return String(value || "global").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function getScopedNamespace(userId = null) {
+  return `${LOCAL_DB_SCOPE_PREFIX}${userId ? `user__${sanitizeScopeKey(userId)}` : "global"}`;
+}
+
+function isDefaultScopedData(data) {
+  return stableStringify(data) === stableStringify(cloneScopedData());
 }
 
 
@@ -144,8 +165,57 @@ function ensureDbShape(data) {
   return { data: next, changed };
 }
 
+function ensureScopedShape(data) {
+  const next = data && typeof data === "object" && !Array.isArray(data) ? data : cloneScopedData();
+  const defaults = cloneScopedData();
+  let changed = false;
+
+  for (const [key, defaultValue] of Object.entries(defaults)) {
+    if (next[key] === undefined || next[key] === null) {
+      next[key] = defaultValue;
+      changed = true;
+      continue;
+    }
+
+    if (key === "settings" && (typeof next.settings !== "object" || Array.isArray(next.settings))) {
+      next.settings = { ...defaultValue };
+      changed = true;
+      continue;
+    }
+
+    if (key === "settings" && typeof next.settings === "object" && !Array.isArray(next.settings)) {
+      for (const [settingKey, settingDefault] of Object.entries(defaultValue)) {
+        if (next.settings[settingKey] === undefined) {
+          if (
+            settingKey === "outboundProxyEnabled" &&
+            typeof next.settings.outboundProxyUrl === "string" &&
+            next.settings.outboundProxyUrl.trim()
+          ) {
+            next.settings.outboundProxyEnabled = true;
+          } else {
+            next.settings[settingKey] = settingDefault;
+          }
+          changed = true;
+        }
+      }
+    }
+
+    if (key === "apiKeys" && Array.isArray(next.apiKeys)) {
+      for (const apiKey of next.apiKeys) {
+        if (apiKey.isActive === undefined || apiKey.isActive === null) {
+          apiKey.isActive = true;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return { data: next, changed };
+}
+
 const userScopeStorage = new AsyncLocalStorage();
 let userMutationLock = Promise.resolve();
+const pendingWrites = new WeakMap();
 
 async function withUserMutationLock(fn) {
   const previous = userMutationLock;
@@ -190,22 +260,10 @@ async function resolveScopedUserId() {
   }
 }
 
-function getScopedStateSync(rootData, userId) {
-  if (!userId) return rootData;
-  if (!rootData.userData || typeof rootData.userData !== "object" || Array.isArray(rootData.userData)) {
-    rootData.userData = {};
-  }
-  if (!rootData.userData[userId] || typeof rootData.userData[userId] !== "object" || Array.isArray(rootData.userData[userId])) {
-    rootData.userData[userId] = cloneScopedData();
-  }
-  const { data } = ensureDbShape(rootData);
-  return data.userData[userId];
-}
-
 async function getScopedDbContext() {
-  const db = await getDb();
   const userId = await resolveScopedUserId();
-  const scope = getScopedStateSync(db.data, userId);
+  const db = await getScopeDb(userId);
+  const scope = db.data;
   return { db, scope, userId };
 }
 
@@ -219,7 +277,89 @@ function getAllScopedStates(rootData) {
 }
 
 async function safeWrite(db) {
-  await db.write();
+  if (!db?.write) return;
+  if (LOCAL_DB_WRITE_DEBOUNCE_MS <= 0) {
+    await db.write();
+    return;
+  }
+
+  const existing = pendingWrites.get(db);
+  if (existing) {
+    existing.dirty = true;
+    return await existing.promise;
+  }
+
+  const state = { dirty: false, promise: null };
+  state.promise = new Promise((resolve, reject) => {
+    setTimeout(async () => {
+      try {
+        do {
+          state.dirty = false;
+          await db.write();
+        } while (state.dirty);
+        pendingWrites.delete(db);
+        resolve();
+      } catch (error) {
+        pendingWrites.delete(db);
+        reject(error);
+      }
+    }, LOCAL_DB_WRITE_DEBOUNCE_MS);
+  });
+
+  pendingWrites.set(db, state);
+  await state.promise;
+}
+
+async function getLegacyConfigDb() {
+  const db = await createDocumentDb(LOCAL_DB_NAMESPACE, cloneDefaultData(), DB_FILE, {
+    preferredBackends: ["postgres", "mongo"],
+    syncBackends: true,
+    seedFromFile: false,
+    balanceBackends: true,
+  });
+  const { data, changed } = ensureDbShape(db.data);
+  db.data = data;
+  if (changed) await db.write();
+  return db;
+}
+
+async function getScopeDb(userId = null) {
+  const db = await createDocumentDb(getScopedNamespace(userId), cloneScopedData(), DB_FILE, {
+    preferredBackends: ["postgres", "mongo"],
+    syncBackends: true,
+    seedFromFile: false,
+    balanceBackends: true,
+  });
+  const { data, changed } = ensureScopedShape(db.data);
+  db.data = data;
+  if (changed) await db.write();
+
+  if (!isDefaultScopedData(db.data)) return db;
+
+  try {
+    const legacyDb = await getLegacyConfigDb();
+    const legacyScope = userId ? legacyDb.data?.userData?.[userId] : legacyDb.data;
+    if (legacyScope && typeof legacyScope === "object" && !Array.isArray(legacyScope)) {
+      const migrated = ensureScopedShape({
+        ...cloneScopedData(),
+        ...legacyScope,
+        settings: {
+          ...cloneScopedData().settings,
+          ...(legacyScope.settings && typeof legacyScope.settings === "object" && !Array.isArray(legacyScope.settings)
+            ? legacyScope.settings
+            : {}),
+        },
+      }).data;
+      if (!isDefaultScopedData(migrated)) {
+        db.data = migrated;
+        await db.write();
+      }
+    }
+  } catch (error) {
+    console.warn("[localDb] Legacy scope migration skipped:", error.message);
+  }
+
+  return db;
 }
 
 async function getAuthDb() {
@@ -234,7 +374,7 @@ async function getAuthDb() {
 
   if (authDb.data.users.length === 0) {
     try {
-      const configDb = await getDb();
+      const configDb = await getLegacyConfigDb();
       const legacyUsers = Array.isArray(configDb.data?.users) ? configDb.data.users : [];
       if (legacyUsers.length > 0) {
         authDb.data.users = legacyUsers;
@@ -249,16 +389,26 @@ async function getAuthDb() {
   return authDb;
 }
 export async function getDb() {
-  const pgDb = await createDocumentDb("localDb", cloneDefaultData(), DB_FILE, {
-    preferredBackends: ["postgres", "mongo"],
-    syncBackends: true,
-    seedFromFile: false,
-    balanceBackends: true,
-  });
-  const { data, changed } = ensureDbShape(pgDb.data);
-  pgDb.data = data;
-  if (changed) await pgDb.write();
-  return pgDb;
+  const [authDb, globalDb] = await Promise.all([getAuthDb(), getScopeDb(null)]);
+  const aggregate = {
+    users: Array.isArray(authDb.data?.users) ? [...authDb.data.users] : [],
+    userData: {},
+    ...cloneScopedData(),
+  };
+  Object.assign(aggregate, JSON.parse(JSON.stringify(globalDb.data || cloneScopedData())));
+
+  for (const user of aggregate.users) {
+    const scopedDb = await getScopeDb(user.id);
+    aggregate.userData[user.id] = JSON.parse(JSON.stringify(scopedDb.data || cloneScopedData()));
+  }
+
+  return {
+    data: aggregate,
+    backend: "segmented",
+    async write() {
+      throw new Error("Aggregate localDb view is read-only; write through scoped APIs");
+    },
+  };
 }
 
 export async function getProviderConnections(filter = {}) {
@@ -736,19 +886,22 @@ export async function updateApiKey(id, data) {
 }
 
 export async function validateApiKey(key) {
-  const db = await getDb();
-  const found = getAllScopedStates(db.data)
-    .flatMap(({ state }) => state.apiKeys || [])
-    .find((apiKey) => apiKey.key === key);
-  return found && found.isActive !== false;
+  const record = await getApiKeyRecord(key);
+  return record && record.isActive !== false;
 }
 
 export async function getApiKeyRecord(key) {
-  const db = await getDb();
-  for (const { ownerId, state } of getAllScopedStates(db.data)) {
-    const found = (state.apiKeys || []).find((apiKey) => apiKey.key === key);
+  const globalDb = await getScopeDb(null);
+  for (const apiKey of globalDb.data.apiKeys || []) {
+    if (apiKey.key === key) return { ...apiKey, ownerId: apiKey.ownerId ?? null };
+  }
+
+  const users = await getUsers();
+  for (const user of users) {
+    const scopedDb = await getScopeDb(user.id);
+    const found = (scopedDb.data.apiKeys || []).find((apiKey) => apiKey.key === key);
     if (found) {
-      return { ...found, ownerId: found.ownerId ?? ownerId ?? null };
+      return { ...found, ownerId: found.ownerId ?? user.id ?? null };
     }
   }
   return null;
@@ -839,8 +992,7 @@ export async function createUser(data = {}) {
     await safeWrite(db);
 
     try {
-      const configDb = await getDb();
-      getScopedStateSync(configDb.data, user.id);
+      const configDb = await getScopeDb(user.id);
       await safeWrite(configDb);
     } catch (error) {
       console.warn("[localDb] Failed to initialize user config scope:", error.message);
