@@ -2,79 +2,109 @@ import fs from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/dataDir.js";
 import { deleteLocalFileFromDrive, restoreLocalFileFromDrive, scheduleDriveUpload } from "@/lib/driveDb.js";
-import { getSettings, updateSettings, runWithUserScope } from "@/lib/localDb";
+import { getCurrentUserScopeId, getUserScopeFromContext, getSettings, updateSettings } from "@/lib/localDb";
 
 const TUNNEL_DIR = path.join(DATA_DIR, "tunnel");
-const STATE_FILE = path.join(TUNNEL_DIR, "state.json");
+const LEGACY_STATE_FILE = path.join(TUNNEL_DIR, "state.json");
 
 const SHORT_ID_LENGTH = 6;
 const SHORT_ID_CHARS = "abcdefghijklmnpqrstuvwxyz23456789";
+
+function sanitizeOwnerId(ownerId) {
+  return String(ownerId || "global").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function getStateFile(ownerId = null) {
+  return path.join(TUNNEL_DIR, ownerId ? `state.${sanitizeOwnerId(ownerId)}.json` : "state.json");
+}
 
 export function ensureTunnelDir() {
   if (!fs.existsSync(TUNNEL_DIR)) fs.mkdirSync(TUNNEL_DIR, { recursive: true });
 }
 
-function readLegacyStateSync() {
+async function resolveOwnerId() {
+  const scoped = getUserScopeFromContext();
+  if (scoped !== null) return scoped;
+  return await getCurrentUserScopeId();
+}
+
+function readStateSync(filePath) {
   try {
-    if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch { /* ignore corrupt state */ }
   return null;
 }
 
-function writeLegacyStateSync(state) {
+function writeStateSync(filePath, state) {
   ensureTunnelDir();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  scheduleDriveUpload(STATE_FILE);
+  fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
+  scheduleDriveUpload(filePath);
 }
 
-export async function loadState() {
-  await restoreLocalFileFromDrive(STATE_FILE).catch(() => false);
-  return readLegacyStateSync();
+async function ensureScopedStateFile(ownerId = null) {
+  const stateFile = getStateFile(ownerId);
+  await restoreLocalFileFromDrive(stateFile).catch(() => false);
+  if (ownerId && !fs.existsSync(stateFile)) {
+    await restoreLocalFileFromDrive(LEGACY_STATE_FILE).catch(() => false);
+    const legacy = readStateSync(LEGACY_STATE_FILE);
+    if (legacy) writeStateSync(stateFile, legacy);
+  }
+  return stateFile;
 }
 
-export function saveState(state) {
-  writeLegacyStateSync(state);
+export async function loadState(ownerId = undefined) {
+  const resolvedOwnerId = ownerId === undefined ? await resolveOwnerId() : ownerId;
+  const stateFile = await ensureScopedStateFile(resolvedOwnerId);
+  return readStateSync(stateFile);
 }
 
-export function clearState() {
+export function saveState(state, ownerId = null) {
+  writeStateSync(getStateFile(ownerId), state);
+}
+
+export function clearState(ownerId = null) {
+  const stateFile = getStateFile(ownerId);
   try {
-    if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
-    deleteLocalFileFromDrive(STATE_FILE).catch(() => false);
+    if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+    deleteLocalFileFromDrive(stateFile).catch(() => false);
   } catch { /* ignore */ }
 }
 
-export async function getTunnelState() {
-  const settings = await runWithUserScope(null, async () => await getSettings());
-  await restoreLocalFileFromDrive(STATE_FILE).catch(() => false);
-  const legacy = readLegacyStateSync();
+export async function getTunnelState(ownerId = undefined) {
+  const resolvedOwnerId = ownerId === undefined ? await resolveOwnerId() : ownerId;
+  const settings = await getSettings();
+  const scopedState = await loadState(resolvedOwnerId);
+  const legacy = resolvedOwnerId ? readStateSync(LEGACY_STATE_FILE) : scopedState;
 
-  const shortId = settings.tunnelShortId || settings.tailscaleShortId || legacy?.shortId || "";
-  const tunnelUrl = settings.tunnelUrl || legacy?.tunnelUrl || "";
+  const shortId = settings.tunnelShortId || settings.tailscaleShortId || scopedState?.shortId || legacy?.shortId || "";
+  const tunnelUrl = settings.tunnelUrl || settings.tailscaleUrl || scopedState?.tunnelUrl || legacy?.tunnelUrl || "";
   const state = shortId || tunnelUrl ? { shortId, tunnelUrl } : null;
 
-  if (legacy && ((shortId && legacy.shortId !== shortId) || (tunnelUrl && legacy.tunnelUrl !== tunnelUrl))) {
-    writeLegacyStateSync(state);
+  if (state && (!scopedState || scopedState.shortId !== state.shortId || scopedState.tunnelUrl !== state.tunnelUrl)) {
+    writeStateSync(getStateFile(resolvedOwnerId), state);
   }
 
   return state;
 }
 
-export async function saveTunnelState(state) {
+export async function saveTunnelState(state, ownerId = undefined) {
+  const resolvedOwnerId = ownerId === undefined ? await resolveOwnerId() : ownerId;
   const next = {
     shortId: state?.shortId || "",
     tunnelUrl: state?.tunnelUrl || "",
   };
-  await runWithUserScope(null, async () => await updateSettings({
+  await updateSettings({
     tunnelShortId: next.shortId,
     tunnelUrl: next.tunnelUrl,
-  }));
-  writeLegacyStateSync(next);
+  });
+  writeStateSync(getStateFile(resolvedOwnerId), next);
   return next;
 }
 
-export async function clearTunnelState() {
-  await runWithUserScope(null, async () => await updateSettings({ tunnelShortId: "", tunnelUrl: "" }));
-  clearState();
+export async function clearTunnelState(ownerId = undefined) {
+  const resolvedOwnerId = ownerId === undefined ? await resolveOwnerId() : ownerId;
+  await updateSettings({ tunnelShortId: "", tunnelUrl: "" });
+  clearState(resolvedOwnerId);
 }
 
 export function generateShortId() {

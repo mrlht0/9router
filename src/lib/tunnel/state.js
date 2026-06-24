@@ -2,11 +2,20 @@ import fs from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/dataDir.js";
 import { deleteLocalFileFromDrive, restoreLocalFileFromDrive, scheduleDriveUpload } from "@/lib/driveDb.js";
+import { getCurrentUserScopeId, getUserScopeFromContext } from "@/lib/localDb.js";
 
 const TUNNEL_DIR = path.join(DATA_DIR, "tunnel");
-const STATE_FILE = path.join(TUNNEL_DIR, "state.json");
+const LEGACY_STATE_FILE = path.join(TUNNEL_DIR, "state.json");
 const CLOUDFLARED_PID_FILE = path.join(TUNNEL_DIR, "cloudflared.pid");
 const TAILSCALE_PID_FILE = path.join(TUNNEL_DIR, "tailscale.pid");
+
+function sanitizeOwnerId(ownerId) {
+  return String(ownerId || "global").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function getStateFile(ownerId = null) {
+  return path.join(TUNNEL_DIR, ownerId ? `state.${sanitizeOwnerId(ownerId)}.json` : "state.json");
+}
 
 function ensureDir() {
   if (!fs.existsSync(TUNNEL_DIR)) {
@@ -14,26 +23,53 @@ function ensureDir() {
   }
 }
 
-export async function loadState() {
+async function resolveOwnerId() {
+  const scoped = getUserScopeFromContext();
+  if (scoped !== null) return scoped;
+  return await getCurrentUserScopeId();
+}
+
+function readStateSync(filePath) {
   try {
-    await restoreLocalFileFromDrive(STATE_FILE).catch(() => false);
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
     }
   } catch (e) { /* ignore corrupt state */ }
   return null;
 }
 
-export function saveState(state) {
-  ensureDir();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  scheduleDriveUpload(STATE_FILE);
+async function ensureScopedStateFile(ownerId = null) {
+  const stateFile = getStateFile(ownerId);
+  await restoreLocalFileFromDrive(stateFile).catch(() => false);
+  if (ownerId && !fs.existsSync(stateFile)) {
+    await restoreLocalFileFromDrive(LEGACY_STATE_FILE).catch(() => false);
+    const legacy = readStateSync(LEGACY_STATE_FILE);
+    if (legacy) saveState(legacy, ownerId);
+  }
+  return stateFile;
 }
 
-export function clearState() {
+export async function loadState(ownerId = undefined) {
+  const resolvedOwnerId = ownerId === undefined ? await resolveOwnerId() : ownerId;
   try {
-    if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
-    deleteLocalFileFromDrive(STATE_FILE).catch(() => false);
+    const stateFile = await ensureScopedStateFile(resolvedOwnerId);
+    return readStateSync(stateFile);
+  } catch (e) { /* ignore corrupt state */ }
+  return null;
+}
+
+export function saveState(state, ownerId = null) {
+  ensureDir();
+  const stateFile = getStateFile(ownerId);
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+  scheduleDriveUpload(stateFile);
+}
+
+export function clearState(ownerId = null) {
+  const stateFile = getStateFile(ownerId);
+  try {
+    if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+    deleteLocalFileFromDrive(stateFile).catch(() => false);
   } catch (e) { /* ignore */ }
 }
 
