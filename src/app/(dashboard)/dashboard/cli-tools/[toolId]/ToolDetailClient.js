@@ -48,9 +48,9 @@ export default function ToolDetailClient({ toolId, machineId }) {
         }
         if (tunnelRes.ok) {
           const data = await tunnelRes.json();
-          setTunnelEnabled(!!(data.tunnel?.settingsEnabled || data.tunnel?.enabled));
+          setTunnelEnabled(!!(data.tunnel?.userEnabled ?? data.tunnel?.settingsEnabled ?? data.tunnel?.enabled));
           setTunnelPublicUrl(data.tunnel?.publicUrl || "");
-          setTailscaleEnabled(!!(data.tailscale?.settingsEnabled || data.tailscale?.enabled));
+          setTailscaleEnabled(!!(data.tailscale?.userEnabled ?? data.tailscale?.settingsEnabled ?? data.tailscale?.enabled));
           setTailscaleUrl(data.tailscale?.tunnelUrl || "");
         }
         if (keysRes.ok) {

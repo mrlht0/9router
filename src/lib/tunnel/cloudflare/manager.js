@@ -53,7 +53,9 @@ export async function enableTunnel(localPort = 20128) {
         ]);
         if (directOk && publicOk) {
           console.log(`[Tunnel] already running, reuse: ${existing.tunnelUrl}`);
-          return { success: true, tunnelUrl: existing.tunnelUrl, shortId: existing.shortId, publicUrl, alreadyRunning: true };
+          await saveTunnelState({ shortId: existing.shortId, tunnelUrl: existing.tunnelUrl });
+          await updateUserSettings({ tunnelEnabled: true, tunnelUrl: existing.tunnelUrl });
+          return { success: true, tunnelUrl: existing.tunnelUrl, shortId: existing.shortId, publicUrl, alreadyRunning: true, attached: true };
         }
         console.log(`[Tunnel] stale (direct=${directOk} public=${publicOk}), respawn`);
       }
@@ -72,6 +74,7 @@ export async function enableTunnel(localPort = 20128) {
       await registerTunnelUrl(shortId, url);
       await saveTunnelState({ shortId, tunnelUrl: url });
       await updateGlobalSettings({ tunnelEnabled: true, tunnelUrl: url });
+      await updateUserSettings({ tunnelEnabled: true, tunnelUrl: url });
     };
 
     // Register exit handler BEFORE spawn so it fires even on early exit
@@ -88,6 +91,7 @@ export async function enableTunnel(localPort = 20128) {
     await registerTunnelUrl(shortId, tunnelUrl);
     await saveTunnelState({ shortId, tunnelUrl });
     await updateGlobalSettings({ tunnelEnabled: true, tunnelUrl });
+    await updateUserSettings({ tunnelEnabled: true, tunnelUrl });
     console.log(`[Tunnel] registered shortId=${shortId} publicUrl=${publicUrl}`);
 
     // Prefer public short URL, but do not fail the whole enable flow if only the

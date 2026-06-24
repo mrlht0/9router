@@ -40,6 +40,15 @@ export async function enableTailscale(localPort = 20128) {
     const shortId = existing?.shortId || generateShortId();
     const tsHostname = shortId;
 
+    const runningNow = await isTailscaleRunningStrict().catch(() => false);
+    if (runningNow) {
+      const machineUrl = (await getGlobalSettings()).tailscaleUrl || "";
+      if (machineUrl) {
+        await updateUserSettings({ tailscaleEnabled: true, tailscaleUrl: machineUrl });
+        return { success: true, tunnelUrl: machineUrl, alreadyRunning: true, attached: true };
+      }
+    }
+
     const loggedIn = await isTailscaleLoggedInStrict();
     console.log(`[Tailscale] loggedIn=${loggedIn}`);
     if (!loggedIn) {
@@ -82,6 +91,7 @@ export async function enableTailscale(localPort = 20128) {
     }
 
     await updateGlobalSettings({ tailscaleEnabled: true, tailscaleUrl: result.tunnelUrl });
+    await updateUserSettings({ tailscaleEnabled: true, tailscaleUrl: result.tunnelUrl });
     console.log(`[Tailscale] funnel up: ${result.tunnelUrl}`);
 
     // Provision TLS cert so Funnel can serve HTTPS (non-fatal if fails)
