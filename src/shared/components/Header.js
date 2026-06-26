@@ -302,12 +302,12 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
 
       {/* Right actions */}
       <div className="flex items-center gap-1 shrink-0">
-        {displayName && loginMethod === "OIDC" && (
+        {displayName && (loginMethod === "OIDC" || loginMethod === "Email/Password") && (
           <div className="hidden sm:flex items-center max-w-[220px] px-3 py-1.5 rounded-full border border-border bg-surface/70 text-xs text-text-muted truncate">
             <span className="material-symbols-outlined text-[14px] mr-1.5 text-primary">person</span>
             <span className="truncate">{displayName}</span>
             <span className="ml-2 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
-              OIDC
+              {loginMethod === "OIDC" ? "OIDC" : "LOCAL"}
             </span>
           </div>
         )}
