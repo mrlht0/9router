@@ -28,7 +28,6 @@ export default function ToolDetailClient({ toolId, machineId }) {
 
   useEffect(() => {
     let mounted = true;
-
     const load = async () => {
       try {
         const [provRes, settingsRes, tunnelRes, keysRes] = await Promise.all([

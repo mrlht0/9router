@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { updateSettings } from "@/lib/localDb";
 
 // Clear the legacy dashboard password hash. Local accounts are reset through account recovery flows.
+// Reset dashboard password to default by clearing the stored hash.
+// Local-only (enforced by dashboardGuard). Never returns the default literal.
 export async function POST() {
   try {
     await updateSettings({ password: null });
@@ -10,4 +12,3 @@ export async function POST() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
-

@@ -7,6 +7,7 @@ import { getSettings, updateSettings, runWithUserScope } from "@/lib/localDb";
 
 const getGlobalSettings = () => runWithUserScope(null, async () => await getSettings());
 const updateGlobalSettings = (updates) => runWithUserScope(null, async () => await updateSettings(updates));
+const updateUserSettings = updateSettings;
 
 const svc = {
   cancelToken: { cancelled: false },

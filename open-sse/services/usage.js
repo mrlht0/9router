@@ -4,12 +4,14 @@
 
 import { getGitHubUsage } from "./usage/github.js";
 import { getGeminiApiKeyUsage } from "./usage/gemini-apikey.js";
+import { getGeminiUsage, getAntigravityUsage } from "./usage/google.js";
 import { getClaudeUsage } from "./usage/claude.js";
 import { getCodexUsage, consumeCodexRateLimitResetCredit } from "./usage/codex.js";
 
 export { consumeCodexRateLimitResetCredit };
 import { getKiroUsage } from "./usage/kiro.js";
 import { getMiniMaxUsage } from "./usage/minimax.js";
+import { getCodeBuddyCnUsage } from "./usage/codebuddy-cn.js";
 import {
   getQwenUsage,
   getIflowUsage,
@@ -41,6 +43,7 @@ const USAGE_HANDLERS = {
   minimax: (c) => getMiniMaxUsage(c.apiKey, c.provider, c.proxyOptions),
   "minimax-cn": (c) => getMiniMaxUsage(c.apiKey, c.provider, c.proxyOptions),
   "vercel-ai-gateway": (c) => getVercelAiGatewayUsage(c.apiKey, c.proxyOptions),
+  "codebuddy-cn": (c) => getCodeBuddyCnUsage(c.accessToken, c.apiKey, c.providerSpecificData, c.proxyOptions),
 };
 
 export async function getUsageForProvider(connection, proxyOptions = null) {

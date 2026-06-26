@@ -9,13 +9,9 @@ import { getProviderConnections, getCombos, getCustomModels, getModelAliases } f
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
-import { runWithApiKeyScope } from "@/sse/services/auth.js";
-
-function extractApiKey(request) {
-  const authHeader = request?.headers?.get?.("Authorization");
-  if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
-  return request?.headers?.get?.("x-api-key") || null;
-}
+import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
+import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
+import { capabilitiesFromServiceKind } from "open-sse/providers/capabilities.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -41,6 +37,23 @@ const LIVE_MODEL_RESOLVERS = {
     return {
       models: result.models.map((m) => ({ id: m.id, name: m.name })),
     };
+  },
+  github: async (conn) => {
+    const result = await resolveCopilotModels({
+      accessToken: conn.accessToken,
+      refreshToken: conn.refreshToken,
+      providerSpecificData: conn.providerSpecificData || {}
+    }, {
+      log: console,
+      onCredentialsRefreshed: async (refreshed) => {
+        await updateProviderCredentials(conn.id, {
+          copilotToken: refreshed.copilotToken,
+          copilotTokenExpiresAt: refreshed.copilotTokenExpiresAt,
+          existingProviderSpecificData: conn.providerSpecificData || {},
+        });
+      },
+    });
+    return result?.models?.length ? { models: result.models } : null;
   }
 };
 
@@ -321,13 +334,22 @@ export async function buildModelsList(kindFilter) {
         })
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
+      const customModelKindById = new Map();
       const customModelIds = customModels
         .filter((m) => {
-          if (!m?.id || (getModelKind(m) && getModelKind(m) !== "llm")) return false;
+          if (!m?.id) return false;
+          const kind = getModelKind(m) || LLM_KIND;
+          // imageToText custom models are vision-capable chat models: expose them
+          // both in the default LLM list and in /v1/models/image-to-text.
+          if (!kindFilter.includes(kind) && !(kind === "imageToText" && kindFilter.includes(LLM_KIND))) return false;
           const alias = m.providerAlias;
           return alias === staticAlias || alias === outputAlias || alias === providerId;
         })
-        .map((m) => String(m.id).trim())
+        .map((m) => {
+          const modelId = String(m.id).trim();
+          if (modelId) customModelKindById.set(modelId, getModelKind(m) || LLM_KIND);
+          return modelId;
+        })
         .filter((modelId) => modelId !== "");
 
       const aliasModelIds = Object.values(modelAliases || {})
@@ -356,16 +378,22 @@ export async function buildModelsList(kindFilter) {
       const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
 
       for (const modelId of mergedModelIds) {
-        // Resolve kind: prefer static metadata, otherwise infer from ID heuristics
-        const kind = staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
-        if (!kindFilter.includes(kind)) continue;
+        // Resolve kind: prefer static/custom metadata, otherwise infer from ID heuristics
+        const customKind = customModelKindById.get(modelId);
+        const kind = staticModelKindById.get(modelId) || customKind || inferKindFromUnknownModelId(modelId);
+        // imageToText custom models stay in the LLM list (vision-capable chat models)
+        const allowAsLlm = kind === "imageToText" && kindFilter.includes(LLM_KIND);
+        if (!kindFilter.includes(kind) && !allowAsLlm) continue;
         if (isDisabled(outputAlias, modelId) || isDisabled(staticAlias, modelId)) continue;
 
-        models.push({
+        const model = {
           id: `${outputAlias}/${modelId}`,
           object: "model",
           owned_by: outputAlias,
-        });
+        };
+        const caps = capabilitiesFromServiceKind(customKind);
+        if (caps) model.capabilities = caps;
+        models.push(model);
       }
 
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind
@@ -417,12 +445,9 @@ export async function OPTIONS() {
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  */
-export async function GET(request) {
+export async function GET() {
   try {
-    const apiKey = extractApiKey(request);
-    const data = await (apiKey
-      ? runWithApiKeyScope(apiKey, () => buildModelsList([LLM_KIND]))
-      : buildModelsList([LLM_KIND]));
+    const data = await buildModelsList([LLM_KIND]);
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });

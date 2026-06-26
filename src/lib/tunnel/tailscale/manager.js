@@ -6,6 +6,7 @@ import { getCachedPassword, loadEncryptedPassword, initDbHooks } from "@/mitm/ma
 
 const getGlobalSettings = () => runWithUserScope(null, async () => await getSettings());
 const updateGlobalSettings = (updates) => runWithUserScope(null, async () => await updateSettings(updates));
+const updateUserSettings = updateSettings;
 
 initDbHooks(getGlobalSettings, updateGlobalSettings);
 
@@ -48,7 +49,6 @@ export async function enableTailscale(localPort = 20128) {
         return { success: true, tunnelUrl: machineUrl, alreadyRunning: true, attached: true };
       }
     }
-
     const loggedIn = await isTailscaleLoggedInStrict();
     console.log(`[Tailscale] loggedIn=${loggedIn}`);
     if (!loggedIn) {

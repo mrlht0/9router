@@ -13,7 +13,7 @@ function isCliRequest(request) {
 
 export async function GET(request) {
   try {
-    if (!isCliRequest(request) && !(await verifyDashboardPassword(request.headers.get(PASSWORD_HEADER), request.cookies.get("auth_token")?.value))) {
+    if (!isCliRequest(request) && !(await verifyDashboardPassword(request.headers.get(PASSWORD_HEADER)))) {
       return NextResponse.json({ error: "Invalid password" }, { status: 401 });
     }
     const payload = await exportDb();
@@ -27,7 +27,7 @@ export async function GET(request) {
 export async function POST(request) {
   try {
     const { password, ...payload } = await request.json();
-    if (!isCliRequest(request) && !(await verifyDashboardPassword(password, request.cookies.get("auth_token")?.value))) {
+    if (!isCliRequest(request) && !(await verifyDashboardPassword(password))) {
       return NextResponse.json({ error: "Invalid password" }, { status: 401 });
     }
     await importDb(payload);

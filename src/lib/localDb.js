@@ -1162,5 +1162,3 @@ export async function resetAllPricing() {
   await safeWrite(db);
   return scope.pricing;
 }
-
-

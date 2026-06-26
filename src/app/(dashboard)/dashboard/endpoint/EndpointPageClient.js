@@ -38,7 +38,7 @@ export default function APIPageClient({ machineId }) {
   const [cavemanLevel, setCavemanLevel] = useState("full");
   const [locale, setLocale] = useState("en");
 
-  // Cloudflare Tunnel state
+ // Cloudflare Tunnel state
   const [tunnelChecking, setTunnelChecking] = useState(true);
   const [tunnelEnabled, setTunnelEnabled] = useState(false);
   const [tunnelReachable, setTunnelReachable] = useState(false);
@@ -284,41 +284,6 @@ export default function APIPageClient({ machineId }) {
     } catch (error) {
       console.log("Error updating requireApiKey:", error);
     }
-  };
-
-  const handleRtkEnabled = async (value) => {
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rtkEnabled: value }),
-      });
-      if (res.ok) setRtkEnabledState(value);
-    } catch (error) {
-      console.log("Error updating rtkEnabled:", error);
-    }
-  };
-
-  const patchSetting = async (patch) => {
-    try {
-      await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-    } catch (error) {
-      console.log("Error updating setting:", error);
-    }
-  };
-
-  const handleCavemanEnabled = (value) => {
-    setCavemanEnabled(value);
-    patchSetting({ cavemanEnabled: value });
-  };
-
-  const handleCavemanLevel = (level) => {
-    setCavemanLevel(level);
-    patchSetting({ cavemanLevel: level });
   };
 
   const fetchData = async () => {
@@ -1100,7 +1065,6 @@ export default function APIPageClient({ machineId }) {
           </div>
         </div>
       </Card>
-
       {/* API Keys */}
       <Card id="require-api-key">
         <div className="flex items-center justify-between mb-4">

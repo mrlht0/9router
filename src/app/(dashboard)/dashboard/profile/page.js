@@ -67,6 +67,10 @@ export default function ProfilePage() {
   }, [langOpen]);
 
   useEffect(() => {
+    setLocale(getLocaleFromCookie());
+  }, [langOpen]);
+
+  useEffect(() => {
     fetch("/api/settings")
       .then((res) => res.json())
       .then((data) => {

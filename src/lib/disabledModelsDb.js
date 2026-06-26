@@ -77,4 +77,3 @@ export async function enableModels(providerAlias, ids) {
   }
   await db.write();
 }
-

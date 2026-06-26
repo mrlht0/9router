@@ -5,8 +5,10 @@ import { cookies } from "next/headers";
 import { setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
 import { isOidcConfigured } from "@/lib/auth/oidc";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
+import { isLocalRequest } from "@/dashboardGuard";
 
 const RESET_HINT = "Forgot password? Reset to default via 9Router CLI → Settings → Reset Password to Default.";
+const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
 
 function isTunnelRequest(request, settings) {
   const host = (request.headers.get("host") || "").split(":")[0].toLowerCase();
@@ -52,6 +54,10 @@ export async function POST(request) {
       return NextResponse.json({ error: "Password is required" }, { status: 400 });
     }
 
+    if (settings.authMode === "oidc" && isOidcConfigured(settings)) {
+      return NextResponse.json({ error: "Password login is disabled. Use OIDC sign in." }, { status: 403 });
+    }
+
     let isValid = false;
     let authClaims = {};
     const user = await getUserByEmail(normalizedEmail);
@@ -71,7 +77,7 @@ export async function POST(request) {
       recordSuccess(ip);
       const cookieStore = await cookies();
       await setDashboardAuthCookie(cookieStore, request, authClaims);
-      return NextResponse.json({ success: true, hasUsers });
+      return NextResponse.json({ success: true, hasUsers }, { headers: NO_STORE_HEADERS });
     }
 
     const { remainingBeforeLock } = recordFail(ip);

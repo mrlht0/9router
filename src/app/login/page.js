@@ -1,14 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Button, Card, Input } from "@/shared/components";
 
 const LOGIN_VIEW = "login";
 const REGISTER_VIEW = "register";
 
 export default function LoginPage() {
-  const router = useRouter();
   const [view, setView] = useState(LOGIN_VIEW);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -35,8 +33,7 @@ export default function LoginPage() {
         if (!res.ok) throw new Error("Failed to load auth status");
         const data = await res.json();
         if (data.requireLogin === false) {
-          router.push("/dashboard");
-          router.refresh();
+          window.location.assign("/dashboard");
           return;
         }
         const usersExist = data.hasUsers === true;
@@ -56,7 +53,7 @@ export default function LoginPage() {
       }
     }
     loadStatus();
-  }, [router]);
+  }, []);
 
   const oidcAvailable = oidcConfigured && ["oidc", "both"].includes(authMode);
   const passwordAvailable = authMode !== "oidc" || !oidcConfigured;
@@ -92,8 +89,7 @@ export default function LoginPage() {
         if (data.retryAfter) setRetryAfter(Number(data.retryAfter));
         return;
       }
-      router.push("/dashboard");
-      router.refresh();
+      window.location.assign("/dashboard");
     } catch {
       setError("Unable to sign in right now.");
     } finally {
@@ -123,8 +119,7 @@ export default function LoginPage() {
         setError(data.error || "Unable to create account.");
         return;
       }
-      router.push("/dashboard");
-      router.refresh();
+      window.location.assign("/dashboard");
     } catch {
       setError("Unable to create account right now.");
     } finally {
