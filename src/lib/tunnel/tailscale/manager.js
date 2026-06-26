@@ -6,7 +6,8 @@ import { getCachedPassword, loadEncryptedPassword, initDbHooks } from "@/mitm/ma
 
 const getGlobalSettings = () => runWithUserScope(null, async () => await getSettings());
 const updateGlobalSettings = (updates) => runWithUserScope(null, async () => await updateSettings(updates));
-const updateUserSettings = updateSettings;
+const getUserSettings = () => getSettings();
+const updateUserSettings = (updates) => updateSettings(updates);
 
 initDbHooks(getGlobalSettings, updateGlobalSettings);
 
@@ -37,7 +38,7 @@ export async function enableTailscale(localPort = 20128) {
     console.log("[Tailscale] daemon ready");
     throwIfCancelled(token);
 
-    const existing = await getTunnelState();
+    const existing = await getTunnelState(null);
     const shortId = existing?.shortId || generateShortId();
     const tsHostname = shortId;
 
@@ -126,15 +127,20 @@ export async function disableTailscale() {
 }
 
 export async function getTailscaleStatus() {
-  const settings = await getGlobalSettings();
-  const settingsEnabled = settings.tailscaleEnabled === true;
-  const tunnelUrl = settings.tailscaleUrl || "";
-  // Skip probes entirely when disabled; check login before running (device removed = not logged in)
-  const loggedIn = settingsEnabled ? isTailscaleLoggedIn() : false;
+  const [globalSettings, userSettings] = await Promise.all([getGlobalSettings(), getUserSettings()]);
+  const settingsEnabled = userSettings.tailscaleEnabled === true;
+  const machineEnabled = globalSettings.tailscaleEnabled === true;
+  const tunnelUrl = globalSettings.tailscaleUrl || userSettings.tailscaleUrl || "";
+  const loggedIn = machineEnabled ? isTailscaleLoggedIn() : false;
   const running = loggedIn ? isTailscaleRunning() : false;
   return {
     enabled: settingsEnabled && running,
     settingsEnabled,
+    userEnabled: settingsEnabled,
+    available: running && !!tunnelUrl,
+    machineRunning: running,
+    machineEnabled,
+    attached: settingsEnabled && running,
     tunnelUrl,
     running,
     loggedIn

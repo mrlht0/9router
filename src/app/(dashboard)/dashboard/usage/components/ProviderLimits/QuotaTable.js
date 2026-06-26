@@ -1,13 +1,11 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { GEMINI_MODEL_DISPLAY_ORDER } from "@/shared/constants/geminiQuotaModels.js";
 import { formatResetTime, getRemainingPercentage } from "./utils";
 
 const PAGE_SIZE = 10;
 
-/**
- * Format reset time display (Today, 12:00 PM)
- */
 function formatResetTimeDisplay(resetTime) {
   if (!resetTime) return null;
 
@@ -39,16 +37,13 @@ function formatResetTimeDisplay(resetTime) {
   }
 }
 
-/**
- * Get color classes based on remaining percentage
- */
 function getColorClasses(remainingPercentage) {
   if (remainingPercentage > 70) {
     return {
       text: "text-green-600 dark:text-green-400",
       bg: "bg-green-500",
       bgLight: "bg-green-500/10",
-      emoji: "🟢",
+      emoji: "G",
     };
   }
 
@@ -57,7 +52,7 @@ function getColorClasses(remainingPercentage) {
       text: "text-yellow-600 dark:text-yellow-400",
       bg: "bg-yellow-500",
       bgLight: "bg-yellow-500/10",
-      emoji: "🟡",
+      emoji: "Y",
     };
   }
 
@@ -65,7 +60,7 @@ function getColorClasses(remainingPercentage) {
     text: "text-red-600 dark:text-red-400",
     bg: "bg-red-500",
     bgLight: "bg-red-500/10",
-    emoji: "🔴",
+    emoji: "R",
   };
 }
 
@@ -81,9 +76,105 @@ function sortQuotas(quotas, sortMode) {
   return quotas;
 }
 
-/**
- * Quota Table Component - Table-based display for quota data
- */
+function isGeminiQuotaSet(quotas) {
+  return Array.isArray(quotas)
+    && quotas.length > 0
+    && quotas.every((quota) => quota?.modelKey && / \| (RPM|TPM|RPD)$/.test(quota?.name || ""));
+}
+
+function parseGeminiMetric(quota) {
+  const match = (quota?.name || "").match(/^(.*) \| (RPM|TPM|RPD)$/);
+  if (!match) return null;
+  return {
+    modelName: match[1],
+    metric: match[2],
+  };
+}
+
+function renderQuotaValue(quota) {
+  if (!quota) return null;
+  const total = quota.unlimited ? "inf" : Number(quota.total || 0).toLocaleString();
+  return `${quota.used.toLocaleString()} / ${total}`;
+}
+
+function GeminiQuotaGrid({ quotas, compact }) {
+  const rows = useMemo(() => {
+    const grouped = new Map();
+    for (const quota of quotas) {
+      const parsed = parseGeminiMetric(quota);
+      if (!parsed) continue;
+      if (!grouped.has(quota.modelKey)) {
+        grouped.set(quota.modelKey, {
+          modelKey: quota.modelKey,
+          modelName: parsed.modelName,
+          RPM: null,
+          TPM: null,
+          RPD: null,
+        });
+      }
+      grouped.get(quota.modelKey)[parsed.metric] = {
+        ...quota,
+        remaining: getRemainingPercentage(quota),
+      };
+    }
+    const order = new Map(GEMINI_MODEL_DISPLAY_ORDER.map((modelKey, index) => [modelKey, index]));
+    return [...grouped.values()].sort((a, b) => {
+      const orderA = order.get(a.modelKey) ?? Number.MAX_SAFE_INTEGER;
+      const orderB = order.get(b.modelKey) ?? Number.MAX_SAFE_INTEGER;
+      if (orderA !== orderB) return orderA - orderB;
+      return a.modelName.localeCompare(b.modelName);
+    });
+  }, [quotas]);
+
+  const pad = compact ? "px-1.5 py-1.5" : "px-3 py-2";
+  const modelText = compact ? "text-[11px]" : "text-sm";
+  const metricText = compact ? "text-[10px]" : "text-xs";
+
+  return (
+    <div className="space-y-2">
+      <div className="overflow-x-auto">
+        <table className="w-full table-fixed text-left">
+          <thead>
+            <tr className="border-b border-black/5 dark:border-white/5 text-text-muted">
+              <th className={`${pad} w-[40%] ${metricText} font-medium`}>Model</th>
+              <th className={`${pad} w-[20%] ${metricText} font-medium text-center`}>RPM</th>
+              <th className={`${pad} w-[20%] ${metricText} font-medium text-center`}>TPM</th>
+              <th className={`${pad} w-[20%] ${metricText} font-medium text-center`}>RPD</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.modelKey} className="border-b border-black/5 dark:border-white/5 align-top">
+                <td className={`${pad} ${modelText} font-medium text-text-primary`}>{row.modelName}</td>
+                {["RPM", "TPM", "RPD"].map((metric) => {
+                  const quota = row[metric];
+                  const remaining = quota ? getRemainingPercentage(quota) : 0;
+                  const colors = getColorClasses(remaining);
+                  const countdown = quota ? formatResetTime(quota.resetAt) : "-";
+                  return (
+                    <td key={metric} className={`${pad} text-center`}>
+                      {quota ? (
+                        <div className="space-y-1">
+                          <div className={`${metricText} font-medium ${colors.text}`}>{metric}</div>
+                          <div className={`${metricText} text-text-primary`}>{renderQuotaValue(quota)}</div>
+                          <div className={`${metricText} ${colors.text}`}>{remaining}%</div>
+                          <div className={`${metricText} text-text-muted`}>{countdown !== "-" ? `in ${countdown}` : "N/A"}</div>
+                        </div>
+                      ) : (
+                        <div className={`${metricText} text-text-muted`}>N/A</div>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function QuotaTable({
   quotas = [],
   compact = false,
@@ -118,6 +209,10 @@ export default function QuotaTable({
 
   if (!quotas || quotas.length === 0) {
     return null;
+  }
+
+  if (isGeminiQuotaSet(quotas)) {
+    return <GeminiQuotaGrid quotas={quotas} compact={compact} />;
   }
 
   const currentPageRows = sortedQuotas.slice(
@@ -181,7 +276,7 @@ export default function QuotaTable({
 
                       <div className={`flex items-center justify-between ${compact ? "text-[10px]" : "text-xs"}`}>
                         <span className="text-text-muted">
-                          {quota.used.toLocaleString()} / {quota.total > 0 ? quota.total.toLocaleString() : "∞"}
+                          {quota.used.toLocaleString()} / {quota.total > 0 ? quota.total.toLocaleString() : "inf"}
                         </span>
                         <span className={`font-medium ${colors.text}`}>
                           {quota.remaining}%

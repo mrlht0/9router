@@ -1,9 +1,8 @@
-import { Low } from "lowdb";
-import { JSONFile } from "lowdb/node";
 import path from "node:path";
 import fs from "node:fs";
 import { DATA_DIR } from "@/lib/dataDir.js";
 import { createDocumentDb, isMongoEnabled, isPostgresEnabled } from "@/lib/documentDb.js";
+import * as sqliteDb from "@/lib/db/index.js";
 
 const DB_FILE = path.join(DATA_DIR, "disabledModels.json");
 
@@ -26,36 +25,59 @@ async function getDb() {
   }
 
   if (!dbInstance) {
-    const adapter = new JSONFile(DB_FILE);
-    dbInstance = new Low(adapter, defaultData);
+    let fileData = { ...defaultData };
     try {
-      await dbInstance.read();
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        dbInstance.data = { ...defaultData };
-        await dbInstance.write();
-      } else {
-        throw error;
+      if (fs.existsSync(DB_FILE)) {
+        const fileContent = fs.readFileSync(DB_FILE, "utf8");
+        fileData = JSON.parse(fileContent);
       }
+    } catch (error) {
+      // syntax errors or read errors
     }
-    if (!dbInstance.data || typeof dbInstance.data !== "object") dbInstance.data = { ...defaultData };
-    if (!dbInstance.data.disabled) dbInstance.data.disabled = {};
+    if (!fileData || typeof fileData !== "object") fileData = { ...defaultData };
+    if (!fileData.disabled) fileData.disabled = {};
+
+    dbInstance = {
+      data: fileData,
+      async read() {
+        try {
+          if (fs.existsSync(DB_FILE)) {
+            const fileContent = fs.readFileSync(DB_FILE, "utf8");
+            this.data = JSON.parse(fileContent);
+          }
+        } catch (error) {
+          // ignore
+        }
+      },
+      async write() {
+        fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), "utf8");
+      }
+    };
   }
   return dbInstance;
 }
 
 export async function getDisabledModels() {
+  if (!isPostgresEnabled() && !isMongoEnabled()) {
+    return await sqliteDb.getDisabledModels();
+  }
   const db = await getDb();
   return db.data.disabled || {};
 }
 
 export async function getDisabledByProvider(providerAlias) {
+  if (!isPostgresEnabled() && !isMongoEnabled()) {
+    return await sqliteDb.getDisabledByProvider(providerAlias);
+  }
   const all = await getDisabledModels();
   return all[providerAlias] || [];
 }
 
 export async function disableModels(providerAlias, ids) {
   if (!providerAlias || !Array.isArray(ids)) return;
+  if (!isPostgresEnabled() && !isMongoEnabled()) {
+    return await sqliteDb.disableModels(providerAlias, ids);
+  }
   const db = await getDb();
   const current = new Set(db.data.disabled[providerAlias] || []);
   ids.forEach((id) => current.add(id));
@@ -65,6 +87,9 @@ export async function disableModels(providerAlias, ids) {
 
 export async function enableModels(providerAlias, ids) {
   if (!providerAlias) return;
+  if (!isPostgresEnabled() && !isMongoEnabled()) {
+    return await sqliteDb.enableModels(providerAlias, ids);
+  }
   const db = await getDb();
   const current = db.data.disabled[providerAlias] || [];
   if (!Array.isArray(ids) || ids.length === 0) {

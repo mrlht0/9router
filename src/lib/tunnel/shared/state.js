@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/dataDir.js";
 import { deleteLocalFileFromDrive, restoreLocalFileFromDrive, scheduleDriveUpload } from "@/lib/driveDb.js";
-import { getCurrentUserScopeId, getUserScopeFromContext, getSettings, updateSettings } from "@/lib/localDb";
+import { getCurrentUserScopeId, getUserScopeFromContext, getSettings, updateSettings, runWithUserScope } from "@/lib/localDb";
 
 const TUNNEL_DIR = path.join(DATA_DIR, "tunnel");
 const LEGACY_STATE_FILE = path.join(TUNNEL_DIR, "state.json");
@@ -26,6 +26,16 @@ async function resolveOwnerId() {
   const scoped = getUserScopeFromContext();
   if (scoped !== null) return scoped;
   return await getCurrentUserScopeId();
+}
+
+async function getScopedSettings(ownerId = undefined) {
+  if (ownerId === null) return await runWithUserScope(null, async () => await getSettings());
+  return await getSettings();
+}
+
+async function updateScopedSettings(ownerId = undefined, updates = {}) {
+  if (ownerId === null) return await runWithUserScope(null, async () => await updateSettings(updates));
+  return await updateSettings(updates);
 }
 
 function readStateSync(filePath) {
@@ -72,7 +82,7 @@ export function clearState(ownerId = null) {
 
 export async function getTunnelState(ownerId = undefined) {
   const resolvedOwnerId = ownerId === undefined ? await resolveOwnerId() : ownerId;
-  const settings = await getSettings();
+  const settings = await getScopedSettings(resolvedOwnerId);
   const scopedState = await loadState(resolvedOwnerId);
   const legacy = resolvedOwnerId ? readStateSync(LEGACY_STATE_FILE) : scopedState;
 
@@ -93,7 +103,7 @@ export async function saveTunnelState(state, ownerId = undefined) {
     shortId: state?.shortId || "",
     tunnelUrl: state?.tunnelUrl || "",
   };
-  await updateSettings({
+  await updateScopedSettings(resolvedOwnerId, {
     tunnelShortId: next.shortId,
     tunnelUrl: next.tunnelUrl,
   });
@@ -103,7 +113,7 @@ export async function saveTunnelState(state, ownerId = undefined) {
 
 export async function clearTunnelState(ownerId = undefined) {
   const resolvedOwnerId = ownerId === undefined ? await resolveOwnerId() : ownerId;
-  await updateSettings({ tunnelShortId: "", tunnelUrl: "" });
+  await updateScopedSettings(resolvedOwnerId, { tunnelShortId: "", tunnelUrl: "" });
   clearState(resolvedOwnerId);
 }
 

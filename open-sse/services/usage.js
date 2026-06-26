@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Usage Fetcher - Get usage data from provider APIs
  */
 
@@ -26,9 +26,10 @@ import {
  * @param {Object} connection - Provider connection with accessToken
  * @returns {Object} Usage data with quotas
  */
-// provider → usage handler (ctx carries every arg each handler needs)
+// provider â†’ usage handler (ctx carries every arg each handler needs)
 const USAGE_HANDLERS = {
   github: (c) => getGitHubUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
+  gemini: (c) => getGeminiApiKeyUsage(c.connectionId, c.apiKey, c.providerSpecificData),
   "gemini-cli": (c) => getGeminiUsage(c.accessToken, c.providerDataWithProjectId, c.proxyOptions),
   antigravity: (c) => getAntigravityUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
   claude: (c) => getClaudeUsage(c.accessToken, c.proxyOptions),
@@ -47,7 +48,7 @@ const USAGE_HANDLERS = {
 };
 
 export async function getUsageForProvider(connection, proxyOptions = null) {
-  const { provider, accessToken, apiKey, providerSpecificData, projectId } = connection;
+  const { id: connectionId, provider, accessToken, apiKey, providerSpecificData, projectId } = connection;
   const providerDataWithProjectId = {
     ...(providerSpecificData || {}),
     ...(projectId ? { projectId } : {}),
@@ -55,5 +56,6 @@ export async function getUsageForProvider(connection, proxyOptions = null) {
 
   const handler = USAGE_HANDLERS[provider];
   if (!handler) return { message: `Usage API not implemented for ${provider}` };
-  return await handler({ provider, accessToken, apiKey, providerSpecificData, providerDataWithProjectId, proxyOptions });
+  return await handler({ connectionId, provider, accessToken, apiKey, providerSpecificData, providerDataWithProjectId, proxyOptions });
 }
+

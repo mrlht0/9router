@@ -383,8 +383,20 @@ export default function APIPageClient({ machineId }) {
         return;
       }
 
-      setTunnelUrl(url);
+            setTunnelUrl(url);
       setTunnelPublicUrl(data.publicUrl || "");
+
+      if (data.healthPending || (!data.publicHealthy && !data.directHealthy)) {
+        setTunnelEnabled(true);
+        setTunnelReachable(false);
+        setTunnelStatus({
+          type: "warning",
+          message: data.warning || "Tunnel started, but public/direct health checks are still pending.",
+        });
+        syncTunnelStatus();
+        return;
+      }
+
       await pingTunnelHealth(data.publicUrl, url);
       syncTunnelStatus();
     } catch (error) {
@@ -784,8 +796,14 @@ export default function APIPageClient({ machineId }) {
             ) : tunnelEnabled && !tunnelLoading && !tunnelReachable ? (
               <>
                 <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded border border-amber-300 dark:border-amber-800 bg-amber-500/5 text-sm text-amber-600 dark:text-amber-400">
-                  <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
-                  {tunnelEverReachable ? "Tunnel reconnecting..." : "Tunnel checking..."}
+                  {tunnelStatus?.type === "warning" ? (
+                    <span className="material-symbols-outlined text-sm">schedule</span>
+                  ) : (
+                    <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
+                  )}
+                  {tunnelStatus?.type === "warning"
+                    ? (tunnelStatus.message || "Tunnel started, health checks are still pending.")
+                    : (tunnelEverReachable ? "Tunnel reconnecting..." : "Tunnel checking...")}
                 </div>
                 <button
                   onClick={() => setShowDisableTunnelModal(true)}

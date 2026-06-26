@@ -1,8 +1,9 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getApiKeyOwnerId, runWithUserScope } from "@/lib/localDb";
+﻿import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getApiKeyOwnerId, runWithUserScope } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { getGeminiConnectionQuotaSnapshot } from "@/lib/geminiQuota.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -61,43 +62,49 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       return null;
     }
 
-    // Filter out model-locked and excluded connections
-    const availableConnections = connections.filter(c => {
-      if (excludeSet.has(c.id)) return false;
-      if (isModelLockActive(c, model)) return false;
-      return true;
-    });
-
-    log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
-    connections.forEach(c => {
+    const availability = await Promise.all(connections.map(async (c) => {
       const excluded = excludeSet.has(c.id);
       const locked = isModelLockActive(c, model);
-      if (excluded || locked) {
-        const lockUntil = getEarliestModelLockUntil(c);
-        log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
+      const quota = providerId === "gemini" && model
+        ? await getGeminiConnectionQuotaSnapshot(c.id, model)
+        : null;
+      const quotaBlocked = quota?.depleted === true;
+      return { connection: c, excluded, locked, quota, quotaBlocked };
+    }));
+
+    const availableConnections = availability
+      .filter((entry) => !entry.excluded && !entry.locked && !entry.quotaBlocked)
+      .map((entry) => entry.connection);
+
+    log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
+    availability.forEach((entry) => {
+      if (entry.excluded || entry.locked || entry.quotaBlocked) {
+        const lockUntil = getEarliestModelLockUntil(entry.connection);
+        const quotaMsg = entry.quotaBlocked ? `estimatedQuota(${entry.quota?.dimension || "unknown"}) until ${entry.quota?.resetAt || "n/a"}` : "";
+        log.debug("AUTH", `  -> ${entry.connection.id?.slice(0, 8)} | ${entry.excluded ? "excluded" : ""} ${entry.locked ? `modelLocked(${model}) until ${lockUntil}` : ""} ${quotaMsg}`);
       }
     });
 
     if (availableConnections.length === 0) {
-      // Find earliest lock expiry across all connections for retry timing
-      const lockedConns = connections.filter(c => isModelLockActive(c, model));
-      const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
-      const earliest = expiries.sort()[0] || null;
+      const retryCandidates = availability
+        .map((entry) => entry.locked ? getEarliestModelLockUntil(entry.connection) : (entry.quotaBlocked ? entry.quota?.resetAt : null))
+        .filter(Boolean)
+        .sort();
+      const earliest = retryCandidates[0] || null;
       if (earliest) {
-        const earliestConn = lockedConns[0];
-        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
+        const firstBlocked = availability.find((entry) => entry.locked || entry.quotaBlocked)?.connection;
+        log.warn("AUTH", `${provider} | all ${connections.length} accounts blocked for ${model || "all"} (${formatRetryAfter(earliest)})`);
         return {
           allRateLimited: true,
           retryAfter: earliest,
           retryAfterHuman: formatRetryAfter(earliest),
-          lastError: earliestConn?.lastError || null,
-          lastErrorCode: earliestConn?.errorCode || null
+          lastError: firstBlocked?.lastError || "Estimated Gemini free-tier quota depleted",
+          lastErrorCode: firstBlocked?.errorCode || 429
         };
       }
       log.warn("AUTH", `${provider} | all ${connections.length} accounts unavailable`);
       return null;
     }
-
     const settings = await getSettings();
     // Per-provider strategy overrides global setting
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
@@ -193,7 +200,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 }
 
 /**
- * Mark account+model as unavailable — locks modelLock_${model} in DB.
+ * Mark account+model as unavailable â€” locks modelLock_${model} in DB.
  * All errors (429, 401, 5xx, etc.) lock per model, not per account.
  * @param {string} connectionId
  * @param {number} status - HTTP status code from upstream
@@ -236,7 +243,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
 
   if (provider && status && reason) {
-    console.error(`❌ ${provider} [${status}]: ${reason}`);
+    console.error(`âŒ ${provider} [${status}]: ${reason}`);
   }
 
   return { shouldFallback: true, cooldownMs };
@@ -322,3 +329,4 @@ export async function runWithApiKeyScope(apiKey, fn) {
   const ownerId = await getApiKeyScopeOwnerId(apiKey);
   return await runWithUserScope(ownerId, fn);
 }
+

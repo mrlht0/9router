@@ -341,6 +341,23 @@ export function parseQuotaData(provider, data) {
         }
         break;
 
+      case "gemini":
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([quotaKey, quota]) => {
+            normalizedQuotas.push({
+              name: quota.name || quotaKey,
+              modelKey: quota.modelKey || quotaKey,
+              used: quota.used || 0,
+              total: quota.total ?? 0,
+              remaining: quota.remaining,
+              remainingPercentage: quota.remainingPercentage,
+              unit: quota.unit,
+              resetAt: quota.resetAt || null,
+            });
+          });
+        }
+        break;
+
       case "codex":
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([quotaType, quota]) => {

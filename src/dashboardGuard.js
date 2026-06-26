@@ -117,6 +117,19 @@ function isPublicLlmApi(pathname) {
   return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
 
+function isSameOriginDashboardRequest(request) {
+  const host = request.headers.get("host") || "";
+  const origin = request.headers.get("origin");
+  const secFetchSite = (request.headers.get("sec-fetch-site") || "").toLowerCase();
+  if (secFetchSite && secFetchSite !== "same-origin" && secFetchSite !== "same-site") return false;
+  if (!origin) return false;
+  try {
+    return new URL(origin).host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 function extractApiKey(request) {
   const authHeader = request.headers.get("Authorization");
   if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
@@ -143,6 +156,15 @@ async function canAccessLocalOnlyRoute(request) {
   if (await hasValidCliToken(request)) return true;
   // Browser on host: loopback Host + Origin (blocks tunnel/CSRF) + auth (JWT or requireLogin=false)
   if (isLocalRequest(request) && await isAuthenticated(request)) return true;
+
+  // Allow authenticated same-origin dashboard requests over tunnel/tailscale.
+  if (await hasValidToken(request)) {
+    const settings = await loadSettings();
+    if (settings?.tunnelDashboardAccess === true && isSameOriginDashboardRequest(request)) {
+      return true;
+    }
+  }
+
   return false;
 }
 

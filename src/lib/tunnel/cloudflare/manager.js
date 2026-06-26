@@ -1,13 +1,14 @@
 import { getTunnelState, saveTunnelState, generateShortId } from "../shared/state.js";
 import { spawnQuickTunnel, killCloudflared, isCloudflaredRunning, setUnexpectedExitHandler } from "./cloudflared.js";
 import { clearPid } from "./pid.js";
-import { waitForHealth, probeUrlAlive } from "./healthCheck.js";
+import { probeUrlAlive, waitForHealth } from "./healthCheck.js";
 import { WORKER_URL } from "./config.js";
 import { getSettings, updateSettings, runWithUserScope } from "@/lib/localDb";
 
 const getGlobalSettings = () => runWithUserScope(null, async () => await getSettings());
 const updateGlobalSettings = (updates) => runWithUserScope(null, async () => await updateSettings(updates));
-const updateUserSettings = updateSettings;
+const getUserSettings = () => getSettings();
+const updateUserSettings = (updates) => updateSettings(updates);
 
 const svc = {
   cancelToken: { cancelled: false },
@@ -44,7 +45,7 @@ export async function enableTunnel(localPort = 20128) {
 
   try {
     if (isCloudflaredRunning()) {
-      const existing = await getTunnelState();
+      const existing = await getTunnelState(null);
       if (existing?.tunnelUrl && existing?.shortId) {
         const publicUrl = `https://r${existing.shortId}.abc-tunnel.us`;
         // Reuse only if BOTH direct + public URL alive (avoid stale socket after network change)
@@ -54,7 +55,7 @@ export async function enableTunnel(localPort = 20128) {
         ]);
         if (directOk && publicOk) {
           console.log(`[Tunnel] already running, reuse: ${existing.tunnelUrl}`);
-          await saveTunnelState({ shortId: existing.shortId, tunnelUrl: existing.tunnelUrl });
+          await saveTunnelState({ shortId: existing.shortId, tunnelUrl: existing.tunnelUrl }, null);
           await updateUserSettings({ tunnelEnabled: true, tunnelUrl: existing.tunnelUrl });
           return { success: true, tunnelUrl: existing.tunnelUrl, shortId: existing.shortId, publicUrl, alreadyRunning: true, attached: true };
         }
@@ -66,14 +67,14 @@ export async function enableTunnel(localPort = 20128) {
     console.log("[Tunnel] killed existing cloudflared");
     throwIfCancelled(token);
 
-    const existing = await getTunnelState();
+    const existing = await getTunnelState(null);
     const shortId = existing?.shortId || generateShortId();
 
     const onUrlUpdate = async (url) => {
       if (token.cancelled) return;
       console.log(`[Tunnel] url updated: ${url}`);
       await registerTunnelUrl(shortId, url);
-      await saveTunnelState({ shortId, tunnelUrl: url });
+      await saveTunnelState({ shortId, tunnelUrl: url }, null);
       await updateGlobalSettings({ tunnelEnabled: true, tunnelUrl: url });
       await updateUserSettings({ tunnelEnabled: true, tunnelUrl: url });
     };
@@ -90,7 +91,7 @@ export async function enableTunnel(localPort = 20128) {
 
     const publicUrl = `https://r${shortId}.abc-tunnel.us`;
     await registerTunnelUrl(shortId, tunnelUrl);
-    await saveTunnelState({ shortId, tunnelUrl });
+    await saveTunnelState({ shortId, tunnelUrl }, null);
     await updateGlobalSettings({ tunnelEnabled: true, tunnelUrl });
     await updateUserSettings({ tunnelEnabled: true, tunnelUrl });
     console.log(`[Tunnel] registered shortId=${shortId} publicUrl=${publicUrl}`);
@@ -150,8 +151,8 @@ export async function disableTunnel() {
   try { killCloudflared(svc.activeLocalPort); } catch (e) { console.warn(`[Tunnel] kill warn: ${e.message}`); }
   clearPid();
 
-  const state = await getTunnelState();
-  if (state?.shortId) await saveTunnelState({ shortId: state.shortId, tunnelUrl: "" });
+  const state = await getTunnelState(null);
+  if (state?.shortId) await saveTunnelState({ shortId: state.shortId, tunnelUrl: "" }, null);
 
   await updateGlobalSettings({ tunnelEnabled: false, tunnelUrl: "" });
   // Force-clear flags so a subsequent enable is not blocked by a stuck spawnInProgress
@@ -161,19 +162,28 @@ export async function disableTunnel() {
 }
 
 export async function getTunnelStatus() {
-  const settings = await getGlobalSettings();
-  const settingsEnabled = settings.tunnelEnabled === true;
-  const state = await getTunnelState();
+  const [globalSettings, userSettings, machineState, userState] = await Promise.all([
+    getGlobalSettings(),
+    getUserSettings(),
+    getTunnelState(null),
+    getTunnelState(),
+  ]);
+  const settingsEnabled = userSettings.tunnelEnabled === true;
+  const machineEnabled = globalSettings.tunnelEnabled === true;
+  const state = machineState;
   const shortId = state?.shortId || "";
   const publicUrl = shortId ? `https://r${shortId}.abc-tunnel.us` : "";
-  const tunnelUrl = state?.tunnelUrl || "";
-
-  // Lazy: skip PID probe entirely when user disabled tunnel
-  const running = settingsEnabled ? isCloudflaredRunning() : false;
+  const tunnelUrl = state?.tunnelUrl || globalSettings.tunnelUrl || userSettings.tunnelUrl || "";
+  const running = machineEnabled ? isCloudflaredRunning() : false;
 
   return {
     enabled: settingsEnabled && running,
     settingsEnabled,
+    userEnabled: settingsEnabled,
+    available: running && !!(publicUrl || tunnelUrl),
+    machineRunning: running,
+    machineEnabled,
+    attached: settingsEnabled && running,
     tunnelUrl,
     shortId,
     publicUrl,
