@@ -31,7 +31,7 @@ export async function GET() {
       oidcLoginLabel: (settings.oidcLoginLabel || "Sign in with OIDC").trim() || "Sign in with OIDC",
       hasPassword: !!settings.password,
       hasUsers,
-      allowRegistration: !hasUsers,
+      allowRegistration: true,
       displayName,
       loginMethod,
       oidcName: authenticated ? (oidcName || null) : null,
